@@ -1,0 +1,18 @@
+
+func getInterfaceIP() string {
+    // Extract the first global IPv4 address cleanly, even in namespaces.
+    out, err := exec.Command(
+        "sh", "-c",
+        "ip -4 -o addr show scope global | awk '{print $4}' | cut -d/ -f1 | head -n1",
+    ).Output()
+    if err != nil {
+        return "127.0.0.1"
+    }
+
+    ip := strings.TrimSpace(string(out))
+    if ip == "" {
+        return "127.0.0.1"
+    }
+    return ip
+}
+

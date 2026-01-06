@@ -1,0 +1,17 @@
+{
+  "chain_id": "blackchain-localnet-1",
+  "genesis_time": "2025-10-22T18:48:56Z",
+  "initial_height": "1",
+  "validators": [
+    {
+      "address": "b27e33a66ea0ace53c7cda9afa3787e1554976125686246f094e0a75ae481b80",
+      "power": "10",
+      "name": "solomon-node"
+    }
+  ],
+  "params": {
+    "block_time": "3s",
+    "max_validators": 21,
+    "consensus": "proof-of-merit"
+  }
+}

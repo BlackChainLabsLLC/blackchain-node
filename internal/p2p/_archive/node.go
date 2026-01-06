@@ -1,0 +1,153 @@
+package p2p
+
+import (
+    "crypto/rand"
+    "encoding/hex"
+    "log"
+    "net"
+    "os/exec"
+    "strings"
+    "sync"
+
+    "blackchain/internal/store"
+)
+
+// getInterfaceIP returns the FIRST valid IPv4 inside this namespace,
+// with strong preference for 10.x.x.x addresses (our virtual nets).
+func getInterfaceIP() string {
+    out, err := exec.Command(
+        "sh", "-c",
+        "ip -o -4 addr show scope global | awk '{print $4}' | cut -d/ -f1",
+    ).Output()
+    if err != nil {
+        return "127.0.0.1"
+    }
+
+    lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+    var fallback string
+
+    for _, ip := range lines {
+        ip = strings.TrimSpace(ip)
+
+        // Prefer 10.x.x.x inside namespaces
+        if strings.HasPrefix(ip, "10.") {
+            return ip
+        }
+
+        // Save first non-empty result as fallback
+        if fallback == "" && ip != "" {
+            fallback = ip
+        }
+    }
+
+    if fallback != "" {
+        return fallback
+    }
+    return "127.0.0.1"
+}
+
+type Node struct {
+    ID         string
+    GossipPort string
+    RPCPort    string
+    Store      *store.PeerStore
+
+    Routes      *RouteTable
+    Crypto      *nodeCrypto
+    staticPeers []string
+    mu          sync.Mutex
+
+    // L1 message inbox (for delivered mesh messages)
+    inbox   []MeshMessage
+    inboxMu sync.Mutex
+    MsgsIn uint64
+    MsgsOut uint64
+    MsgsRelay uint64
+}
+
+func (n *Node) gossipAddr() string {
+    ip := getInterfaceIP()
+    return ip + ":" + n.GossipPort
+}
+
+func generateNodeID() (string, error) {
+    var b [16]byte
+    if _, err := rand.Read(b[:]); err != nil {
+        return "", err
+    }
+    return hex.EncodeToString(b[:]), nil
+}
+
+func NewNode(gossipPort, rpcPort string) (*Node, error) {
+    id, err := generateNodeID()
+    if err != nil {
+        return nil, err
+    }
+
+    crypto, err := newNodeCrypto()
+    if err != nil {
+        return nil, err
+    }
+
+    return &Node{
+        ID:          id,
+        GossipPort:  gossipPort,
+        RPCPort:     rpcPort,
+        Store:       store.NewPeerStore(),
+        Routes:      NewRouteTable(),
+        Crypto:      crypto,
+        staticPeers: []string{},
+    }, nil
+}
+
+func (n *Node) AddStaticPeer(addr string) error {
+    n.mu.Lock()
+    defer n.mu.Unlock()
+
+    if _, _, err := net.SplitHostPort(addr); err != nil {
+        return err
+    }
+
+    for _, existing := range n.staticPeers {
+        if existing == addr {
+            return nil
+        }
+    }
+
+    n.staticPeers = append(n.staticPeers, addr)
+    log.Printf("static peer registered: %s", addr)
+    return nil
+}
+
+func (n *Node) StaticPeers() []string {
+    n.mu.Lock()
+    defer n.mu.Unlock()
+    out := make([]string, len(n.staticPeers))
+    copy(out, n.staticPeers)
+    return out
+}
+
+func (n *Node) Run() error {
+    log.Printf("node starting (id=%s gossip=%s rpc=%s)", n.ID, n.GossipPort, n.RPCPort)
+
+    // Restore any persisted peers, start prune + ping loops.
+    n.LoadPeersFromDisk()
+    go n.pruneStalePeersLoop()
+    n.startPinger()
+
+    // Start route aging (TTL ~30s) so dead routes are cleaned up over time.
+    if n.Routes != nil {
+        n.Routes.StartAgingLoop(30)
+    }
+
+    // Start gossip + message transport.
+    go n.runGossip()
+    go n.runMessageTransport()
+
+    // Start crypto handshake loop (if enabled).
+    if n.Crypto != nil {
+        go n.startCryptoHandshakeLoop()
+    }
+
+    return n.runRPC()
+}

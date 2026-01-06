@@ -1,0 +1,220 @@
+package mesh
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+)
+
+/* ===================== CONFIG / TYPES ===================== */
+
+type MeshDaemonOptions struct {
+	MeshConfigPath string
+	DataDir        string
+}
+
+type DaemonNode interface {
+	Shutdown(ctx context.Context) error
+}
+
+type Peer struct {
+	Addr      string    `json:"addr"`
+	LastSeen  time.Time `json:"last_seen"`
+	Connected bool      `json:"connected"` // activity-based
+	Reachable bool      `json:"reachable"` // dial-based
+}
+
+// RouteEntry is a simple 1-hop view of neighbors for the debug API.
+type RouteEntry struct {
+	PeerID     string    `json:"PeerID"`
+	NextHop    string    `json:"NextHop"`
+	Distance   int       `json:"Distance"`
+	LastUpdate time.Time `json:"LastUpdate"`
+}
+
+type meshDaemon struct {
+	bootstrapPeers []string
+	listener       net.Listener
+	peers          map[string]*Peer
+	lock           sync.RWMutex
+	httpSrv        *http.Server
+
+	// Identity + messaging support (expected by messages.go / gossip.go / reputation.go / seen.go)
+	id     string
+	nodeID string
+	inbox  []Message
+	seen   map[string]time.Time
+
+	// Reputation + UC (expected by reputation.go)
+	repMu      sync.Mutex
+	reputation map[string]*Reputation
+	uc         map[string]*UCRecord
+}
+
+/* ===================== START DAEMON ===================== */
+
+func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, error) {
+	cfg, err := LoadMeshConfig(opts.MeshConfigPath)
+	if err != nil {
+		return nil, err
+	}
+
+	ln, err := net.Listen("tcp", cfg.Listen)
+	if err != nil {
+		return nil, fmt.Errorf("listen %s: %w", cfg.Listen, err)
+	}
+
+	m := &meshDaemon{
+		bootstrapPeers: cfg.Peers,
+
+		listener:   ln,
+		peers:      make(map[string]*Peer),
+		id:         cfg.Listen,
+		nodeID:     cfg.Listen,
+		inbox:      make([]Message, 0, 128),
+		seen:       make(map[string]time.Time),
+		reputation: make(map[string]*Reputation),
+		uc:         make(map[string]*UCRecord),
+	}
+
+	m.startLivenessLoop()
+	// === Outbound Peering Bootstrap ===
+	if len(cfg.Peers) > 0 {
+		go m.ConnectToPeers(cfg.Peers)
+		log.Println("[mesh] dialing peers:", cfg.Peers)
+	}
+
+	log.Println("[mesh] listening on", cfg.Listen)
+
+	// === Inbound accept loop ===
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					log.Println("[mesh] accept error:", err)
+					return
+				}
+			}
+
+			// Hand off to message handler; it will decide if this is a handshake or JSON msg.
+			go m.handleIncoming(conn)
+		}
+	}()
+
+	// === HTTP Debug API (optional) ===
+	if cfg.Debug != "" {
+		mux := http.NewServeMux()
+
+		mux.HandleFunc("/peers", func(w http.ResponseWriter, _ *http.Request) {
+			m.lock.RLock()
+			defer m.lock.RUnlock()
+			_ = json.NewEncoder(w).Encode(m.peers)
+		})
+
+		mux.HandleFunc("/routes", func(w http.ResponseWriter, _ *http.Request) {
+			m.lock.RLock()
+			defer m.lock.RUnlock()
+
+			routes := make([]RouteEntry, 0, len(m.peers))
+			for addr, p := range m.peers {
+				last := p.LastSeen
+				if last.IsZero() {
+					last = time.Now()
+				}
+				routes = append(routes, RouteEntry{
+					PeerID:     addr,
+					NextHop:    addr,
+					Distance:   1,
+					LastUpdate: last,
+				})
+			}
+
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"routes": routes,
+			})
+		})
+
+		mux.HandleFunc("/reputation", func(w http.ResponseWriter, _ *http.Request) {
+			reps := m.snapshotReputation()
+			_ = json.NewEncoder(w).Encode(reps)
+		})
+
+		mux.HandleFunc("/uc", func(w http.ResponseWriter, _ *http.Request) {
+			balances := m.snapshotUC()
+			_ = json.NewEncoder(w).Encode(balances)
+		})
+
+		mux.HandleFunc("/inbox", func(w http.ResponseWriter, _ *http.Request) {
+			log.Printf("[inbox] meshDaemon=%p inbox_len=%d", m, len(m.inbox))
+
+			m.lock.RLock()
+			defer m.lock.RUnlock()
+			_ = json.NewEncoder(w).Encode(m.inbox)
+		})
+
+		mux.HandleFunc("/debug/inject", func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			msg := strings.TrimSpace(string(body))
+			if msg == "" {
+				http.Error(w, "empty body", http.StatusBadRequest)
+				return
+			}
+
+			id := fmt.Sprintf("%d-%s", time.Now().UnixNano(), m.id)
+
+			// Store locally so /inbox shows the injected message immediately
+			m.lock.Lock()
+			m.inbox = append(m.inbox, Message{
+				From: m.id,
+				To:   "broadcast",
+				Body: msg,
+				Time: time.Now(),
+			})
+			m.lock.Unlock()
+
+			// Mark seen + start gossip
+			m.markSeen(id)
+			m.gossipOrigin(msg, "broadcast", id, 3)
+
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "id": id})
+		})
+
+		m.httpSrv = &http.Server{
+			Addr:    cfg.Debug,
+			Handler: mux,
+		}
+
+		go func() {
+			if err := m.httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Println("[mesh] debug API error:", err)
+			}
+		}()
+
+		log.Println("[mesh] debug API →", cfg.Debug)
+	}
+
+	return m, nil
+}
+
+/* ===================== SHUTDOWN ===================== */
+
+func (m *meshDaemon) Shutdown(ctx context.Context) error {
+	if m.httpSrv != nil {
+		_ = m.httpSrv.Shutdown(ctx)
+	}
+	if m.listener != nil {
+		return m.listener.Close()
+	}
+	return nil
+}

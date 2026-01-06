@@ -1,0 +1,36 @@
+package p2p
+
+// === Minimal routing: if direct peer known → send directly
+//     else broadcast to all static peers (flood routing)
+
+func (n *Node) routeNextHop(toID string) string {
+    // If direct route known use it
+    if hop, ok := n.Routes.Get(toID); ok {
+        return hop
+    }
+    // else flood — choose first static peer
+    peers := n.StaticPeers()
+    if len(peers) > 0 {
+        return peers[0]
+    }
+    return "" // no route known (rare for 3-mesh)
+}
+
+// === Message handler: deliver to inbox OR relay onward
+
+func (n *Node) handleIncomingMessage(msg *MeshMessage, src string) {
+    if msg.ToID == n.ID {
+        n.inboxMu.Lock()
+        n.inbox = append(n.inbox, *msg)
+        n.msgsIn++
+        n.inboxMu.Unlock()
+        return
+    }
+
+    // Relay if TTL left
+    if msg.Hops < msg.MaxHops {
+        msg.Hops++
+        n.msgsRelay++
+        n.forwardMessage(msg, n.routeNextHop(msg.ToID))
+    }
+}

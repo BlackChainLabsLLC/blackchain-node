@@ -1,0 +1,38 @@
+package p2p
+
+import (
+    "encoding/json"
+    "fmt"
+    "log"
+    "net"
+    "strconv"
+    "strings"
+)
+
+type wireMessage struct {
+    Type       string `json:"type"`
+    FromID     string `json:"from_id"`
+    ToID       string `json:"to_id"`
+    Hops       int    `json:"hops"`
+    MaxHops    int    `json:"max_hops"`
+    Ciphertext string `json:"ciphertext"` // plaintext in fallback mode
+}
+
+// 🔥 PLAINTEXT MODE — crypto disabled for debugging
+func (n *Node) encryptForPeer(toPeer string, plain string) (string, error) {
+    return plain, nil
+}
+
+func (n *Node) decryptFromPeer(fromPeer, data string) (string, error) {
+    return data, nil
+}
+
+func messageAddrFromGossip(gossipAddr string) string {
+    host, portStr, err := net.SplitHostPort(gossipAddr)
+    if err != nil { return gossipAddr }
+    p, err := strconv.Atoi(portStr)
+    if err != nil { return gossipAddr }
+    return fmt.Sprintf("%s:%d", host, p+1000)
+}
+
+// === UDP transport continues unmodified ===

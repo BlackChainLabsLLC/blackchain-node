@@ -1,0 +1,46 @@
+func (n *Node) handleGossip(msg gossipMessage, remote net.Addr) {
+    // Cleanly extract IP:port from remote UDP address.
+    addr := msg.Addr
+    if addr == "" {
+        if udp, ok := remote.(*net.UDPAddr); ok {
+            addr = udp.IP.String() + ":" + strconv.Itoa(udp.Port)
+        } else {
+            addr = remote.String()
+        }
+    }
+
+    now := time.Now().Unix()
+
+    n.Store.Upsert(&store.Peer{
+        ID:       msg.ID,
+        Address:  addr,
+        LastSeen: now,
+        Score:    1,
+    })
+
+    if n.Routes != nil {
+        n.Routes.UpdateDirect(msg.ID, addr)
+
+        peers := make([]*store.Peer, 0, len(msg.Peers))
+        for _, pAddr := range msg.Peers {
+            if pAddr == "" || pAddr == addr {
+                continue
+            }
+            peers = append(peers, &store.Peer{
+                ID:       pAddr,
+                Address:  pAddr,
+                LastSeen: now,
+                Score:    1,
+            })
+        }
+        if len(peers) > 0 {
+            n.Routes.UpdateFromPeerList(msg.ID, addr, peers)
+        }
+    }
+
+    _ = n.AddStaticPeer(addr)
+
+    for _, p := range msg.Peers {
+        _ = n.AddStaticPeer(p)
+    }
+}

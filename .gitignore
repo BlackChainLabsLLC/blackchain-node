@@ -1,0 +1,26 @@
+# binaries
+cmd/blacknetd/blacknetd
+blacknetd
+
+# runtime
+data/
+logs/
+*.log
+
+# solomon artifacts
+.solomon_*
+.demo_archive_*/
+.git_corrupted_*
+.uptime_*
+uptime.*
+last_drift_trace.txt
+accept_trace.txt
+classifier_test_output.txt
+msg.json
+node.uptime
+
+# misc
+*.bak.*
+*.tmp
+*.swp
+.DS_Store

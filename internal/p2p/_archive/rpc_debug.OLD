@@ -1,0 +1,79 @@
+package p2p
+
+import (
+    "encoding/json"
+    "net/http"
+)
+
+// registerDebugHandlers wires all debug endpoints into the given mux.
+// Called from runRPC after the mux is created.
+func (n *Node) registerDebugHandlers(mux *http.ServeMux) {
+    // New v2 endpoints
+    mux.HandleFunc("/debug/v2/traffic", n.handleDebugTraffic)
+    mux.HandleFunc("/debug/v2/state", n.handleDebugState)
+
+    // Legacy aliases for older tooling (e.g. ack_send.sh)
+    mux.HandleFunc("/debug/traffic", n.handleDebugTraffic)
+    mux.HandleFunc("/debug/state", n.handleDebugState)
+}
+
+// debugTrafficResponse is the JSON shape for /debug/v2/traffic.
+type debugTrafficResponse struct {
+    ID        string `json:"id"`
+    MsgsIn    uint64 `json:"msgs_in"`
+    MsgsOut   uint64 `json:"msgs_out"`
+    MsgsRelay uint64 `json:"msgs_relay"`
+}
+
+// handleDebugTraffic returns basic traffic counters for this node.
+func (n *Node) handleDebugTraffic(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodGet {
+        http.Error(w, "only GET allowed", http.StatusMethodNotAllowed)
+        return
+    }
+
+    resp := debugTrafficResponse{
+        ID:        n.ID,
+        MsgsIn:    n.MsgsIn,
+        MsgsOut:   n.MsgsOut,
+        MsgsRelay: n.MsgsRelay,
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    _ = json.NewEncoder(w).Encode(&resp)
+}
+
+// debugStateResponse is a higher-level node snapshot for /debug/v2/state.
+type debugStateResponse struct {
+    ID          string   `json:"id"`
+    GossipAddr  string   `json:"gossip_addr"`
+    RPCPort     string   `json:"rpc_port"`
+    StaticPeers []string `json:"static_peers"`
+    MsgsIn      uint64   `json:"msgs_in"`
+    MsgsOut     uint64   `json:"msgs_out"`
+    MsgsRelay   uint64   `json:"msgs_relay"`
+}
+
+// handleDebugState returns a compact view of node state that does not
+// depend on any routing / store internals (safe & compile-proof).
+func (n *Node) handleDebugState(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodGet {
+        http.Error(w, "only GET allowed", http.StatusMethodNotAllowed)
+        return
+    }
+
+    peers := n.StaticPeers()
+
+    resp := debugStateResponse{
+        ID:          n.ID,
+        GossipAddr:  n.gossipAddr(),
+        RPCPort:     n.RPCPort,
+        StaticPeers: peers,
+        MsgsIn:      n.MsgsIn,
+        MsgsOut:     n.MsgsOut,
+        MsgsRelay:   n.MsgsRelay,
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    _ = json.NewEncoder(w).Encode(&resp)
+}

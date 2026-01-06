@@ -1,0 +1,21 @@
+package meshbridge
+
+import (
+    "errors"
+    "blackchain/internal/mesh"
+)
+
+// MeshDaemonOptions — what daemon.go expects.
+type MeshDaemonOptions struct {
+    MeshConfigPath string
+    DataDir        string
+}
+
+// StartMeshDaemon — minimal shim to satisfy daemon.go.
+func StartMeshDaemon(opts MeshDaemonOptions) (*mesh.MeshDaemon, error) {
+    d := mesh.NewMeshDaemon()
+    if d == nil {
+        return nil, errors.New("failed to initialize mesh daemon")
+    }
+    return d, nil
+}

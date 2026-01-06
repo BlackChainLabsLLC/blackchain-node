@@ -1,0 +1,91 @@
+package p2p
+
+import (
+    "bytes"
+    "encoding/json"
+    "fmt"
+    "io"
+    "log"
+    "net"
+    "net/http"
+    "strconv"
+)
+
+// Core routed message POST /send
+func (n *Node) handleSend(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodPost {
+        http.Error(w, "POST required", http.StatusMethodNotAllowed)
+        return
+    }
+
+    var req RoutedMessage
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        http.Error(w, "decode error: "+err.Error(), http.StatusBadRequest)
+        return
+    }
+
+    if req.From == "" {
+        req.From = n.ID
+    }
+
+    if req.To == n.ID {
+        msg := &MeshMessage{
+            FromID:  req.From,
+            ToID:    req.To,
+            Hops:    req.Hops,
+            MaxHops: 0,
+            Payload: req.Body,
+        }
+        n.addToInbox(msg)
+        _ = json.NewEncoder(w).Encode(map[string]any{
+            "delivered": true, "at": n.ID, "hops": req.Hops,
+        })
+        return
+    }
+
+    nextHop, ok := n.Routes.NextHopFor(req.To)
+    if !ok {
+        http.Error(w, "no route", http.StatusBadGateway)
+        return
+    }
+
+    host, portStr, err := net.SplitHostPort(nextHop)
+    if err != nil {
+        http.Error(w, err.Error(), http.StatusBadGateway)
+        return
+    }
+    p, _ := strconv.Atoi(portStr)
+    target := fmt.Sprintf("%s:%d", host, p+100)
+
+    req.Hops++
+    buf := &bytes.Buffer{}
+    _ = json.NewEncoder(buf).Encode(&req)
+
+    resp, err := http.Post("http://"+target+"/send", "application/json", buf)
+    if err != nil {
+        http.Error(w, "forward error: "+err.Error(), http.StatusBadGateway)
+        return
+    }
+    defer resp.Body.Close()
+
+    w.WriteHeader(resp.StatusCode)
+    _, _ = io.Copy(w, resp.Body)
+}
+
+// GET /inbox
+func (n *Node) handleInbox(w http.ResponseWriter, r *http.Request) {
+    msgs := n.getInboxSnapshot()
+    _ = json.NewEncoder(w).Encode(map[string]any{"inbox": msgs})
+}
+
+// === RPC router init ===
+func (n *Node) runRPC() error {
+    mux := http.NewServeMux()
+    mux.HandleFunc("/send", n.handleSend)
+    mux.HandleFunc("/inbox", n.handleInbox)
+
+    // Re-attach debug v2 suite (no conflict now)
+    n.registerDebugHandlers(mux)
+
+    return http.ListenAndServe(":"+n.RPCPort, mux)
+}

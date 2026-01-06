@@ -1,0 +1,283 @@
+package p2p
+
+import (
+    "bytes"
+    "encoding/json"
+    "fmt"
+    "io"
+    "log"
+    "net"
+    "net/http"
+    "strconv"
+)
+
+// payload for /send
+type sendRequest struct {
+    From string `json:"from"`
+    To   string `json:"to"`
+    Body string `json:"body"`
+    Hops int    `json:"hops"`
+}
+
+// handleSend delivers to local inbox or forwards via the route table.
+func (n *Node) handleSend(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodPost {
+        http.Error(w, "only POST allowed", http.StatusMethodNotAllowed)
+        return
+    }
+
+    var req sendRequest
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        http.Error(w, "invalid json body", http.StatusBadRequest)
+        return
+    }
+
+    if req.To == "" {
+        http.Error(w, "missing to field", http.StatusBadRequest)
+        return
+    }
+
+    if req.From == "" {
+        req.From = n.ID
+    }
+
+    // If this node is the destination, append to inbox and respond.
+    if req.To == n.ID {
+        msg := &MeshMessage{
+            FromID:  req.From,
+            ToID:    req.To,
+            Hops:    req.Hops,
+            MaxHops: 0,
+            Payload: req.Body,
+        }
+        n.addToInbox(msg)
+
+        w.Header().Set("Content-Type", "application/json")
+        _ = json.NewEncoder(w).Encode(map[string]any{
+            "delivered": true,
+            "at":        n.ID,
+            "hops":      req.Hops,
+        })
+        return
+    }
+
+    if n.Routes == nil {
+        http.Error(w, "no route table available", http.StatusBadGateway)
+        return
+    }
+
+    nextHop, ok := n.Routes.NextHopFor(req.To)
+    if !ok {
+        http.Error(w, "no route to destination", http.StatusBadGateway)
+        return
+    }
+
+    // Increment hop count for each forward.
+    req.Hops++
+
+    buf := &bytes.Buffer{}
+    if err := json.NewEncoder(buf).Encode(&req); err != nil {
+        http.Error(w, "encode error", http.StatusInternalServerError)
+        return
+    }
+
+    // nextHop is a GOSSIP address like "10.200.0.3:55113"
+    // We need to talk to that peer"s RPC port instead (55213).
+    host, portStr, err := net.SplitHostPort(nextHop)
+    if err != nil {
+        http.Error(w, "invalid nextHop address: "+err.Error(), http.StatusBadGateway)
+        return
+    }
+
+    port, err := strconv.Atoi(portStr)
+    if err != nil {
+        http.Error(w, "invalid nextHop port: "+err.Error(), http.StatusBadGateway)
+        return
+    }
+
+    rpcPort := port + 100 // 55111 -> 55211, etc.
+    target := fmt.Sprintf("%s:%d", host, rpcPort)
+
+    log.Printf("forwarding message %s -> %s via gossip %s (rpc %s)",
+        req.From, req.To, nextHop, target)
+
+    resp, err := http.Post("http://"+target+"/send", "application/json", buf)
+    if err != nil {
+        http.Error(w, "forward error: "+err.Error(), http.StatusBadGateway)
+        return
+    }
+    defer resp.Body.Close()
+
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(resp.StatusCode)
+    _, _ = io.Copy(w, resp.Body)
+}
+
+func (n *Node) runRPC() error {
+    mux := http.NewServeMux()
+
+    // POST /send -> routed message delivery
+    mux.HandleFunc("/send", n.handleSend)
+
+    // GET /peers -> current peer store
+    mux.HandleFunc("/peers", func(w http.ResponseWriter, r *http.Request) {
+        peers := n.Store.All()
+        w.Header().Set("Content-Type", "application/json")
+        _ = json.NewEncoder(w).Encode(map[string]any{"peers": peers})
+    })
+
+    // GET /routes -> current routing table snapshot
+    mux.HandleFunc("/routes", func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("Content-Type", "application/json")
+        if n.Routes == nil {
+            _ = json.NewEncoder(w).Encode(map[string]any{"routes": []Route{}})
+            return
+        }
+        routes := n.Routes.Snapshot()
+        _ = json.NewEncoder(w).Encode(map[string]any{"routes": routes})
+    })
+
+    // GET /ping -> basic liveness check
+    mux.HandleFunc("/ping", n.handlePing)
+
+    // GET /inbox -> local message inbox
+    mux.HandleFunc("/inbox", func(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodGet {
+            http.Error(w, "only GET allowed", http.StatusMethodNotAllowed)
+            return
+        }
+        msgs := n.InboxSnapshot()
+        w.Header().Set("Content-Type", "application/json")
+        _ = json.NewEncoder(w).Encode(map[string]any{"inbox": msgs})
+    })
+
+    // GET /debug/state -> full node state snapshot for debugging
+    mux.HandleFunc("/debug/state", func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("Content-Type", "application/json")
+
+        var routes []Route
+        if n.Routes != nil {
+            routes = n.Routes.Snapshot()
+        } else {
+            routes = []Route{}
+        }
+
+        state := map[string]any{
+            "id":           n.ID,
+            "gossip_addr":  n.gossipAddr(),
+            "rpc_port":     n.RPCPort,
+            "static_peers": n.StaticPeers(),
+            "peers":        n.Store.All(),
+            "routes":       routes,
+        }
+
+        _ = json.NewEncoder(w).Encode(state)
+    })
+
+    // GET /debug/crypto -> inspect ECC state (no-op if Crypto is nil)
+    mux.HandleFunc("/debug/crypto", func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("Content-Type", "application/json")
+
+        if n.Crypto == nil {
+            _ = json.NewEncoder(w).Encode(map[string]any{
+                "id":         n.ID,
+                "enabled":    false,
+                "public_key": nil,
+                "peers":      map[string]string{},
+            })
+            return
+        }
+
+        _ = json.NewEncoder(w).Encode(map[string]any{
+            "id":         n.ID,
+            "enabled":    true,
+            "public_key": n.Crypto.SelfPublicKey,
+            "peers":      n.Crypto.Peers,
+        })
+    })
+
+    // POST /crypto/handshake -> exchange and register ECC public keys
+    mux.HandleFunc("/crypto/handshake", func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("Content-Type", "application/json")
+
+        if n.Crypto == nil {
+            _ = json.NewEncoder(w).Encode(map[string]any{
+                "id":         n.ID,
+                "enabled":    false,
+                "public_key": nil,
+                "peers":      map[string]string{},
+            })
+            return
+        }
+
+        if r.Method != http.MethodPost {
+            http.Error(w, "only POST allowed", http.StatusMethodNotAllowed)
+            return
+        }
+
+        var in struct {
+            ID     string `json:"id"`
+            PubKey string `json:"pubkey"`
+        }
+        if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+            http.Error(w, "invalid json", http.StatusBadRequest)
+            return
+        }
+        if in.ID == "" || in.PubKey == "" {
+            http.Error(w, "missing id or pubkey", http.StatusBadRequest)
+            return
+        }
+
+        if err := n.Crypto.RegisterPeerPublicKey(in.ID, in.PubKey); err != nil {
+            http.Error(w, "register pubkey: "+err.Error(), http.StatusBadRequest)
+            return
+        }
+
+        // Reply with our own id + pubkey so caller can register us too.
+        _ = json.NewEncoder(w).Encode(map[string]any{
+            "id":     n.ID,
+            "pubkey": n.Crypto.SelfPublicKey,
+        })
+    })
+
+
+    // GET /topology -> combined physical + logical + crypto view
+    mux.HandleFunc("/topology", func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("Content-Type", "application/json")
+
+        var routes []Route
+        if n.Routes != nil {
+            routes = n.Routes.Snapshot()
+        } else {
+            routes = []Route{}
+        }
+
+        var cryptoView map[string]any
+        if n.Crypto != nil {
+            cryptoView = map[string]any{
+                "enabled":    true,
+                "public_key": n.Crypto.SelfPublicKey,
+                "peers":      n.Crypto.Peers,
+            }
+        } else {
+            cryptoView = map[string]any{
+                "enabled":    false,
+                "public_key": nil,
+                "peers":      map[string]string{},
+            }
+        }
+
+        _ = json.NewEncoder(w).Encode(map[string]any{
+            "id":           n.ID,
+            "gossip_addr":  n.gossipAddr(),
+            "rpc_port":     n.RPCPort,
+            "static_peers": n.StaticPeers(),
+            "routes":       routes,
+            "crypto":       cryptoView,
+        })
+    })
+
+    log.Printf("rpc listening on :%s", n.RPCPort)
+    return http.ListenAndServe(":"+n.RPCPort, mux)
+}
+

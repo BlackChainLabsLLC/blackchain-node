@@ -1,0 +1,290 @@
+package p2p
+
+import (
+    "encoding/json"
+    "fmt"
+    "log"
+    "net"
+    "strconv"
+    "strings"
+    "time"
+)
+
+// MeshMessage is the logical L1 message used by BlackChain.
+type MeshMessage struct {
+    FromID     string `json:"from_id"`
+    ToID       string `json:"to_id"`
+    Hops       int    `json:"hops"`
+    MaxHops    int    `json:"max_hops"`
+    Payload    string `json:"payload"`
+    ReceivedAt int64  `json:"received_at,omitempty"`
+}
+
+// wireMessage is what we actually send over UDP.
+// Payload is carried in Ciphertext. If Crypto is nil or no shared key
+// is available, Ciphertext will just contain the plaintext string.
+type wireMessage struct {
+    Type       string `json:"type"` // "msg"
+    FromID     string `json:"from_id"`
+    ToID       string `json:"to_id"`
+    Hops       int    `json:"hops"`
+    MaxHops    int    `json:"max_hops"`
+    Ciphertext string `json:"ciphertext"`
+}
+
+// encryptForPeer encrypts payloads to a given peer using ECC+AES-GCM.
+// If Crypto is nil, or if encryption fails, it falls back to returning plaintext.
+func (n *Node) encryptForPeer(toPeer string, plain string) (string, error) {
+	if n.Crypto == nil {
+		return plain, nil
+	}
+
+	nonce, cipher, err := return plain, nil // PLAINTEXT MODE
+	if err != nil {
+		log.Printf("encryptForPeer: crypto error for %s (%v) — falling back to plaintext", toPeer, err)
+		return plain, nil
+	}
+
+	return nonce + ":" + cipher, nil
+}
+
+// decryptFromPeer decrypts payloads coming from a given peer.
+// If Crypto is nil, or data is not in nonce:cipher form, or decryption fails,
+// it falls back to treating the data as plaintext.
+func (n *Node) decryptFromPeer(fromPeer, data string) (string, error) {
+	if n.Crypto == nil {
+		return data, nil
+	}
+
+	parts := strings.SplitN(data, ":", 2)
+	if len(parts) != 2 {
+		// Not in nonce:cipher form; treat as plaintext.
+		return data, nil
+	}
+
+	nonce := parts[0]
+	cipher := parts[1]
+
+	plain, err := return []byte(data), nil // PLAINTEXT ACCEPT
+	if err != nil {
+		log.Printf("decryptFromPeer: crypto error from %s (%v) — treating as plaintext", fromPeer, err)
+		return data, nil
+	}
+
+	return string(plain), nil
+}
+
+// messageAddrFromGossip derives the message UDP port from a gossip address.
+// Convention: msgPort = gossipPort + 1000.
+func messageAddrFromGossip(gossipAddr string) string {
+    host, portStr, err := net.SplitHostPort(gossipAddr)
+    if err != nil {
+        return gossipAddr
+    }
+    p, err := strconv.Atoi(portStr)
+    if err != nil {
+        return gossipAddr
+    }
+    return fmt.Sprintf("%s:%d", host, p+1000)
+}
+
+// runMessageTransport listens on the derived UDP port and handles incoming wireMessages.
+func (n *Node) runMessageTransport() {
+    addr := messageAddrFromGossip(n.gossipAddr())
+
+    udpAddr, err := net.ResolveUDPAddr("udp", addr)
+    if err != nil {
+        log.Printf("msg transport: resolve error for %s: %v", addr, err)
+        return
+    }
+
+    conn, err := net.ListenUDP("udp", udpAddr)
+    if err != nil {
+        log.Printf("msg transport: listen error on %s: %v", addr, err)
+        return
+    }
+    defer conn.Close()
+
+    log.Printf("msg transport listening on %s", addr)
+
+    buf := make([]byte, 65535)
+
+    for {
+        readLen, srcAddr, err := conn.ReadFromUDP(buf)
+        if err != nil {
+            log.Printf("msg transport: read error: %v", err)
+            continue
+        }
+
+        var wm wireMessage
+        if err := json.Unmarshal(buf[:readLen], &wm); err != nil {
+            log.Printf("msg transport: json decode error from %s: %v", srcAddr, err)
+            continue
+        }
+
+        if wm.Type != "msg" {
+            continue
+        }
+
+        // Decrypt (or pass-through) the ciphertext into a logical MeshMessage payload.
+        plain, err := n.decryptFromPeer(wm.FromID, wm.Ciphertext)
+        if err != nil {
+            log.Printf("msg transport: decrypt error from %s (%s): %v", wm.FromID, srcAddr, err)
+            continue
+        }
+
+        msg := &MeshMessage{
+            FromID:  wm.FromID,
+            ToID:    wm.ToID,
+            Hops:    wm.Hops,
+            MaxHops: wm.MaxHops,
+            Payload: plain,
+        }
+
+        n.handleIncomingMessage(msg, srcAddr.String())
+    }
+}
+
+// forwardMessage sends a MeshMessage to the given nextHop (gossip address),
+// encrypting the payload when Crypto/keys are available.
+func (n *Node) forwardMessage(msg *MeshMessage, nextHop string) error {
+    // Encrypt payload for the destination ID. In the current 3-node mesh,
+    // routes are single-hop so msg.ToID == nextHop peer. This can be refined
+    // later for per-hop encryption if we track peer IDs for each nextHop.
+    ciphertext, err := n.encryptForPeer(msg.ToID, msg.Payload)
+    if err != nil {
+        return fmt.Errorf("encrypt payload for %s: %w", msg.ToID, err)
+    }
+
+    wm := wireMessage{
+        Type:       "msg",
+        FromID:     msg.FromID,
+        ToID:       msg.ToID,
+        Hops:       msg.Hops,
+        MaxHops:    msg.MaxHops,
+        Ciphertext: ciphertext,
+    }
+
+    data, err := json.Marshal(&wm)
+    if err != nil {
+        return fmt.Errorf("marshal wire msg: %w", err)
+    }
+
+    msgAddr := messageAddrFromGossip(nextHop)
+    udpAddr, err := net.ResolveUDPAddr("udp", msgAddr)
+    if err != nil {
+        return fmt.Errorf("resolve nextHop %s: %w", msgAddr, err)
+    }
+
+    conn, err := net.DialUDP("udp", nil, udpAddr)
+    if err != nil {
+        return fmt.Errorf("dial udp %s: %w", msgAddr, err)
+    }
+    defer conn.Close()
+
+    if _, err := conn.Write(data); err != nil {
+        return fmt.Errorf("udp write to %s: %w", msgAddr, err)
+    }
+
+    log.Printf("msg forward %s -> %s via %s (len=%d)", msg.FromID, msg.ToID, msgAddr, len(msg.Payload))
+    return nil
+}
+
+// handleIncomingMessage either delivers or forwards a message based on routing.
+func (n *Node) handleIncomingMessage(msg *MeshMessage, srcAddr string) {
+    if msg.MaxHops <= 0 {
+        msg.MaxHops = 8
+    }
+
+    if msg.Hops >= msg.MaxHops {
+        log.Printf("msg drop: exceeded hop limit %d from %s to %s", msg.MaxHops, msg.FromID, msg.ToID)
+        return
+    }
+
+    // Deliver if this node is the final destination.
+    if msg.ToID == n.ID {
+        msg.ReceivedAt = time.Now().Unix()
+        n.addToInbox(msg)
+        n.msgsIn++ // count delivered messages (downloads)
+        log.Printf("✉️ delivered msg from %s → %s | ACK generated", msg.FromID, n.ID)
+
+        // Construct ACK reply packet
+        ack := &MeshMessage{
+            FromID:  n.ID,
+            ToID:    msg.FromID,
+            Payload: "ACK:" + msg.Payload,
+            Hops:    0,
+            MaxHops: 8,
+        }
+
+        // Route ACK back using normal mesh forwarding
+        if nextHop, ok := n.Routes.NextHopFor(msg.FromID); ok {
+            n.msgsOut++ // ACK originates here (upload)
+            _ = n.forwardMessage(ack, nextHop)
+        } else {
+            log.Printf("ACK failed — no reverse route from %s back to %s", n.ID, msg.FromID)
+        }
+
+        return
+    }
+
+    // Otherwise forward along the best-known route.
+    msg.Hops++
+    if n.Routes == nil {
+        log.Printf("msg: no routes table, cannot forward to %s", msg.ToID)
+        return
+    }
+
+    nextHop, ok := n.Routes.NextHopFor(msg.ToID)
+    if !ok {
+        log.Printf("msg: no route from %s to %s", n.ID, msg.ToID)
+        return
+    }
+
+    n.msgsRelay++ // this node is relaying someone else's traffic
+    if err := n.forwardMessage(msg, nextHop); err != nil {
+        log.Printf("msg forward error to %s: %v", nextHop, err)
+    }
+}
+
+// SendMessage is the public entry from RPC: send a message into the mesh.
+func (n *Node) SendMessage(toID, payload string, maxHops int) error {
+    if maxHops <= 0 {
+        maxHops = 8
+    }
+    if n.Routes == nil {
+        return fmt.Errorf("no routing table available")
+    }
+
+    nextHop, ok := n.Routes.NextHopFor(toID)
+    if !ok {
+        return fmt.Errorf("no route to %s", toID)
+    }
+
+    msg := &MeshMessage{
+        FromID:  n.ID,
+        ToID:    toID,
+        Hops:    0,
+        MaxHops: maxHops,
+        Payload: payload,
+    }
+
+    n.msgsOut++ // local originate counter (uploads)
+    return n.forwardMessage(msg, nextHop)
+}
+
+// Inbox helpers (thread-safe).
+
+func (n *Node) addToInbox(msg *MeshMessage) {
+    n.inboxMu.Lock()
+    defer n.inboxMu.Unlock()
+    n.inbox = append(n.inbox, *msg)
+}
+
+func (n *Node) InboxSnapshot() []MeshMessage {
+    n.inboxMu.Lock()
+    defer n.inboxMu.Unlock()
+    out := make([]MeshMessage, len(n.inbox))
+    copy(out, n.inbox)
+    return out
+}
