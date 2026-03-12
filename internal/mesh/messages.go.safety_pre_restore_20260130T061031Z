@@ -1,0 +1,333 @@
+package mesh
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net"
+	"strings"
+	"time"
+)
+
+type Message struct {
+	From string    `json:"from"`
+	To   string    `json:"to"`
+	Body string    `json:"body"`
+	Time time.Time `json:"time"`
+}
+
+// wireMessage MUST remain compatible with all mesh modules.
+type wireMessage struct {
+	ID     string `json:"id,omitempty"`
+	Type   string `json:"type"`
+	From   string `json:"from"`          // origin
+	Via    string `json:"via,omitempty"` // immediate hop
+	To     string `json:"to,omitempty"`
+	Body   string `json:"body"`
+	Topic  string `json:"topic,omitempty"`
+	Time   int64  `json:"time"`
+	TTL    int    `json:"ttl,omitempty"`
+	PubKey string `json:"pubkey,omitempty"`
+}
+
+// sendWire dials addr and writes a single wireMessage JSON line.
+// Best-effort: used for Phase 4.3 fast sync requests (snapshot_req).
+func sendWire(addr string, wm wireMessage) error {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return fmt.Errorf("sendWire: empty addr")
+	}
+	c, err := net.DialTimeout("tcp", addr, 1500*time.Millisecond)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+
+	_ = c.SetWriteDeadline(time.Now().Add(1500 * time.Millisecond))
+	b, _ := json.Marshal(wm)
+	_, err = c.Write(append(b, '\n'))
+	return err
+}
+
+// handleIncoming processes all inbound mesh TCP messages.
+func (m *meshDaemon) handleIncoming(conn net.Conn) {
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	reader := bufio.NewReader(conn)
+	line, err := reader.ReadBytes('\n')
+	if err != nil || len(line) == 0 {
+		return
+	}
+
+	line = bytes.TrimSpace(line)
+
+	var wm wireMessage
+	if err := json.Unmarshal(line, &wm); err != nil {
+		log.Printf("[handleIncoming] recv raw_from_conn=%s bytes=%d", conn.RemoteAddr().String(), len(line))
+		_, _ = conn.Write([]byte("blackchain-mesh-ok\n"))
+		return
+	}
+
+	// Accept known types. Unknown types get a simple ok.
+	switch wm.Type {
+	case "msg", "block", "height_req", "range_req", "snapshot_req", "snapshot_resp":
+	default:
+		_, _ = conn.Write([]byte("blackchain-mesh-ok\n"))
+		return
+	}
+
+	// REQUESTS (respond and return; do not gossip)
+	// Phase 4.3: fast sync probe (height negotiation)
+	// Request: respond directly on this TCP connection (no daemon send helpers).
+	if wm.Type == "height_req" {
+		m.chain.mu.RLock()
+		h := m.chain.height
+		tip := m.chain.tip
+		m.chain.mu.RUnlock()
+
+		raw, _ := json.Marshal(map[string]any{"height": h, "tip": tip})
+		out := wireMessage{
+			Type: "height_resp",
+			From: m.id,
+			Via:  m.id,
+			To:   wm.From,
+			Body: string(raw),
+			Time: time.Now().Unix(),
+		}
+		data, _ := json.Marshal(out)
+		_, _ = conn.Write(append(data, '\n'))
+		return
+	}
+
+	if wm.Type == "height_resp" {
+		var obj map[string]any
+		if err := json.Unmarshal([]byte(wm.Body), &obj); err == nil {
+			rhAny, ok := obj["height"]
+			if ok {
+				var rh int64
+				switch v := rhAny.(type) {
+				case float64:
+					rh = int64(v)
+				case int64:
+					rh = v
+				case int:
+					rh = int64(v)
+				default:
+					rh = 0
+				}
+
+				m.chain.mu.RLock()
+				lh := m.chain.height
+				m.chain.mu.RUnlock()
+
+				if rh > lh+25 {
+					// request snapshot from the mesh (existing snapshot_req handler responds with snapshot_resp)
+					req := wireMessage{Type: "snapshot_req", Body: ""}
+					_ = sendWire(strings.TrimSpace(wm.From), req)
+				}
+			}
+		}
+	}
+
+	if wm.Type == "snapshot_req" {
+		m.chain.mu.RLock()
+		snap := m.chain.ExportSnapshotLocked()
+		m.chain.mu.RUnlock()
+
+		body, _ := json.Marshal(snap)
+		out := wireMessage{
+			Type: "snapshot_resp",
+			From: m.id,
+			Via:  m.id,
+			To:   wm.From,
+			Body: string(body),
+			Time: time.Now().Unix(),
+		}
+		data, _ := json.Marshal(out)
+		_, _ = conn.Write(append(data, '\n'))
+	}
+
+	if wm.Type == "snapshot_resp" {
+		if wm.Body != "" {
+			// Phase M.4: gate snapshots (never rollback)
+			var snap ChainSnapshot
+			if err := json.Unmarshal([]byte(wm.Body), &snap); err == nil {
+				if snap.Height > 0 && snap.Hash != "" {
+					m.chain.mu.RLock()
+					localH := m.chain.height
+					m.chain.mu.RUnlock()
+
+					if snap.Height > localH {
+						m.chain.mu.Lock()
+						_, _ = m.chain.LoadSnapshotFromBytes([]byte(wm.Body))
+						m.chain.mu.Unlock()
+						log.Printf("[sync] snapshot applied height=%d (local was %d)", snap.Height, localH)
+					} else {
+						log.Printf("[sync] snapshot ignored height=%d <= local=%d", snap.Height, localH)
+					}
+				}
+			}
+		}
+		return
+	}
+
+	if wm.Type == "height_req" {
+		m.chain.mu.RLock()
+		resp := map[string]any{"height": m.chain.height, "tip": m.chain.tip}
+		m.chain.mu.RUnlock()
+
+		body, _ := json.Marshal(resp)
+		out := wireMessage{
+			Type: "height_resp",
+			From: m.id,
+			Via:  m.id,
+			To:   wm.From,
+			Body: string(body),
+			Time: time.Now().Unix(),
+		}
+		data, _ := json.Marshal(out)
+		_, _ = conn.Write(append(data, '\n'))
+	}
+
+	if wm.Type == "range_req" {
+		type rr struct {
+			From int64 `json:"from"`
+			To   int64 `json:"to"`
+		}
+		var req rr
+		if err := json.Unmarshal([]byte(wm.Body), &req); err != nil {
+			return
+		}
+		if req.From < 1 {
+			req.From = 1
+		}
+		if req.To < req.From {
+			return
+		}
+		// hard clamp to keep abuse low
+		if req.To-req.From > 500 {
+			req.To = req.From + 500
+		}
+
+		blocks := make([]Block, 0, (req.To-req.From)+1)
+
+		m.chain.mu.RLock()
+		for h := req.From; h <= req.To; h++ {
+			if b, ok := m.chain.blocks[h]; ok {
+				blocks = append(blocks, b)
+			}
+		}
+		m.chain.mu.RUnlock()
+
+		body, _ := json.Marshal(blocks)
+		out := wireMessage{
+			Type: "range_resp",
+			From: m.id,
+			Via:  m.id,
+			To:   wm.From,
+			Body: string(body),
+			Time: time.Now().Unix(),
+		}
+		data, _ := json.Marshal(out)
+		_, _ = conn.Write(append(data, '\n'))
+	}
+
+	// EVENTS (dedupe + dispatch)
+	if wm.ID == "" {
+		wm.ID = fmt.Sprintf("auto-%d", time.Now().UnixNano())
+	}
+
+	m.lock.RLock()
+	_, seen := m.seen[wm.ID]
+	m.lock.RUnlock()
+	if seen {
+		return
+	}
+	m.markSeen(wm.ID)
+
+	// ACTIVITY TRUTH:
+	// Touch ONLY the immediate neighbor (Via). Never the origin.
+	sender := strings.TrimSpace(wm.Via)
+	if sender != "" {
+		m.TouchPeer(sender)
+	}
+
+	// BLOCK EVENT: apply + forward while TTL remains
+	if wm.Type == "block" {
+		m.handleBlockWire(wm)
+		return
+	}
+
+	// MSG EVENT: store in inbox + forward while TTL remains
+	msg := Message{
+		From: wm.From,
+		To:   wm.To,
+		Body: wm.Body,
+		Time: time.Unix(wm.Time, 0),
+	}
+
+	// Phase O.3: signed_state as normal "msg" Topic. Store peer signed state for later checks.
+	if wm.Topic == "signed_state" && strings.TrimSpace(wm.Body) != "" {
+		var ann SignedStateAnnouncement
+		if err := json.Unmarshal([]byte(wm.Body), &ann); err == nil {
+			if strings.TrimSpace(ann.NodeID) == "" {
+				ann.NodeID = strings.TrimSpace(wm.From)
+			}
+			m.peerStateMu.Lock()
+			if m.peerState == nil {
+				m.peerState = make(map[string]SignedStateAnnouncement)
+			}
+			m.peerState[ann.NodeID] = ann
+			m.peerStateMu.Unlock()
+			log.Printf("[signed_state] stored node_id=%s height=%d", ann.NodeID, ann.Height)
+			        }
+		}
+	}
+
+	m.lock.Lock()
+	m.inbox = append(m.inbox, msg)
+	m.lock.Unlock()
+
+	log.Printf("[msg] received from %s ttl=%d id=%s: %q",
+		msg.From, wm.TTL, wm.ID, msg.Body)
+
+	if wm.TTL > 0 {
+		m.gossipForward(wm)
+	}
+}
+
+// handleBlockWire applies a block received over the mesh, then forwards while TTL remains.
+func (m *meshDaemon) handleBlockWire(wm wireMessage) {
+	var b Block
+	if err := json.Unmarshal([]byte(wm.Body), &b); err != nil {
+		return
+	}
+
+	m.chain.mu.Lock()
+	appliedNow, err := m.chain.applyBlockOrBufferLocked(b)
+	m.chain.mu.Unlock()
+	if err != nil {
+		return
+	}
+
+	if appliedNow {
+		log.Printf("[block] applied height=%d hash=%s", b.Height, b.Hash)
+	} else {
+		log.Printf("[block] buffered height=%d (waiting for %d)", b.Height, b.Height-1)
+	}
+
+	if wm.TTL > 0 {
+		m.gossipForward(wm)
+	}
+}
+
+// SignedStateAnnouncement is gossiped periodically
+type SignedStateAnnouncement struct {
+	NodeID    string `json:"node_id"`
+	Height    int64  `json:"height"`
+	StateHash string `json:"state_hash"`
+	Sig       string `json:"sig"`
+}

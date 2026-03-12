@@ -1,26 +1,30 @@
-# binaries
-cmd/blacknetd/blacknetd
-blacknetd
 
-# runtime
+# runtime data
 data/
+
+# tls certificates and keys
+tls/
+
+# audit logs
 logs/
-*.log
 
-# solomon artifacts
-.solomon_*
-.demo_archive_*/
-.git_corrupted_*
-.uptime_*
-uptime.*
-last_drift_trace.txt
-accept_trace.txt
-classifier_test_output.txt
-msg.json
-node.uptime
+# local builds
+bin/
+build/
 
-# misc
-*.bak.*
-*.tmp
+# editor files
 *.swp
+*.tmp
+
+# backup files
+*.bak
+
+# OS files
 .DS_Store
+
+*.bak
+*.debugbak
+*.tmp
+*.old
+*.log
+.bak_*/

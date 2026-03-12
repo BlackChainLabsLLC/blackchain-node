@@ -1,14 +1,14 @@
 package mesh
 
 import (
-	"blackchain/internal/crypto"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
-	"path/filepath"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -41,9 +41,6 @@ type RouteEntry struct {
 }
 
 type meshDaemon struct {
-	// Phase 6: optional mTLS transport
-	tlsCfg         *MeshTLS
-	walletAddr     string
 	bootstrapPeers []string
 	listener       net.Listener
 	peers          map[string]*Peer
@@ -61,24 +58,13 @@ type meshDaemon struct {
 	reputation map[string]*Reputation
 	uc         map[string]*UCRecord
 
-	// blockchain
-	chain *ProductionChain
-
-	// signed state gossip (Phase O.3)
-	peerStateMu sync.Mutex
-	peerState   map[string]SignedStateAnnouncement
-
-	// blockchain
-
-	// blockchain
-
-	// chain persistence
-	dataDir    string
-	persistDir string
-	// discovery subsystem
+	// discovery state
 	discoMu    sync.RWMutex
 	discoCfg   discoveryConfig
 	discoPeers map[string]discoveredPeer
+
+	// runtime data dir (from CLI --data)
+	dataDir string
 }
 
 /* ===================== START DAEMON ===================== */
@@ -89,96 +75,35 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 		return nil, err
 	}
 
-	ln, err := meshListen(cfg.Listen, cfg.TLS)
+	ln, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
 		return nil, fmt.Errorf("listen %s: %w", cfg.Listen, err)
 	}
 
-	// Node name (used for default data dir), NOT necessarily network identity.
-	nodeName := strings.TrimSpace(cfg.NodeID)
-	if nodeName == "" {
-		nodeName = "node1"
-	}
-
-	// Phase AA: DataDir authority
-	// 1) CLI (--data) wins
-	// 2) config DataDir next
-	// 3) default: data/<nodeName>
-	dataDir := strings.TrimSpace(opts.DataDir)
-	if dataDir == "" {
-		dataDir = strings.TrimSpace(cfg.DataDir)
-	}
-	if dataDir == "" {
-		dataDir = filepath.Join("data", nodeName)
-	}
-
-	// Wallet (for coinbase payout address)
-	walletPath := filepath.Join(dataDir, "wallet.json")
-	w, err := crypto.LoadOrCreateWallet(walletPath)
-	if err != nil {
-		return nil, err
-	}
 	m := &meshDaemon{
-		tlsCfg:         cfg.TLS,
-		chain:          newProductionChain(),
-		dataDir:        dataDir,
-		walletAddr:     w.Address,
-		persistDir:     cfg.PersistDir,
 		bootstrapPeers: cfg.Peers,
 
 		listener:   ln,
 		peers:      make(map[string]*Peer),
 		id:         cfg.Listen,
-		nodeID:     nodeName,
+		nodeID:     cfg.Listen,
 		inbox:      make([]Message, 0, 128),
 		seen:       make(map[string]time.Time),
 		reputation: make(map[string]*Reputation),
 		uc:         make(map[string]*UCRecord),
+		dataDir:    opts.DataDir,
 	}
-	m.chain.ensureGenesisLocked()
-
-	m.chain.daemon = m
-
-	// Persistence roots into chain
-	m.chain.dataDir = m.dataDir
-	m.chain.persistDir = m.persistDir
-
-	// Load snapshot if present, then replay blocks
-	if _, err := m.chain.LoadSnapshotFromDisk(); err != nil {
-		return nil, err
-	}
-	if err := m.chain.loadFromDisk(); err != nil {
-		return nil, err
-	}
-
-	// LOCK: snapshot/load may re-init chain internals; re-bind daemon after load.
-	m.chain.daemon = m
-
-	// Seed local validator into deterministic validatorSet (so quorum math never starts at 0)
-	m.chain.mu.Lock()
-	localID := m.chain.ValidatorIDLocked()
-	if localID != "" && localID != "ERR_NO_VALIDATOR" {
-		m.chain.observeValidatorLocked(localID)
-	}
-	m.chain.mu.Unlock()
 
 	m.startLivenessLoop()
-	m.startSignedStateLoop()
-
-	// Outbound peering bootstrap + sync
+	// === Outbound Peering Bootstrap ===
 	if len(cfg.Peers) > 0 {
 		go m.ConnectToPeers(cfg.Peers)
-		go m.bootstrapSync(ctx)
-
-		// discovery promotion + eviction
-		go m.discoveryPromoteLoop(ctx)
-		go m.discoveryEvictDeadLoop(ctx)
 		log.Println("[mesh] dialing peers:", cfg.Peers)
 	}
 
 	log.Println("[mesh] listening on", cfg.Listen)
 
-	// Inbound accept loop
+	// === Inbound accept loop ===
 	go func() {
 		for {
 			conn, err := ln.Accept()
@@ -191,23 +116,71 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 					return
 				}
 			}
+
+			// Hand off to message handler; it will decide if this is a handshake or JSON msg.
 			go m.handleIncoming(conn)
 		}
 	}()
 
-	// HTTP Debug API (optional)
-	if cfg.HttpListen != "" {
+	// === HTTP Debug API (optional) ===
+	if cfg.Debug != "" {
+
+		// discovery (leader/client)
+		m.enableDiscoveryIfConfigured(ctx, cfg)
+
 		mux := http.NewServeMux()
 
-		// DEBUG: wallet + daemon binding (LEGO proof)
-		// Register on BOTH mux and DefaultServeMux so we cannot get 404 regardless of which mux is live.
+		// Product runtime surface (read config once)
+		rc := loadRuntimeConfig("config/mesh-node1.json")
 
-		m.registerChainHandlers(mux)
+		// Product surface endpoints (installer/UI grade)
+		mux.HandleFunc("/version", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok":        true,
+				"product":   "BlackChain",
+				"binary":    "blacknetd",
+				"version":   Version,
+				"commit":    Commit,
+				"built_utc": BuiltUTC,
+			})
+		})
 
-		m.httpSrv = &http.Server{
-			Addr:    cfg.HttpListen,
-			Handler: buildHTTPMiddleware(cfg)(mux),
-		}
+		mux.HandleFunc("/info", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			host, _ := os.Hostname()
+			if m.httpSrv != nil {
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok":       true,
+				"node_id":  m.id,
+				"host":     host,
+				"http":     rc.HTTPListen,
+				"features": []string{"mesh", "discovery", "chain", "crypto"},
+			})
+		})
+
+		// /status: minimal operational summary (does not assume internal fields)
+		mux.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
+                w.Header().Set("Content-Type", "application/json")
+                // Product API is the node Debug listener (HTTP)
+                // Mesh transport is the node Listen listener
+                resp := map[string]any{
+                        "ok":      true,
+                        "product": "BlackChain",
+                        "node_id": m.id,
+                        "http":    m.debugAddr,
+                        "mesh":    m.listenAddr,
+                        "peers":   len(m.peers),
+                        "note":    "use /health /version /peers /routes /inbox /chain/status for subsystem status",
+                }
+                _ = json.NewEncoder(w).Encode(resp)
+        })
+})
+
+		mux.HandleFunc("/discovery/status", m.handleDiscoveryStatus)
+		mux.HandleFunc("/discovery/peers", m.handleDiscoveryPeers)
+		mux.HandleFunc("/discovery/register", m.handleDiscoveryRegister)
 
 		mux.HandleFunc("/peers", func(w http.ResponseWriter, _ *http.Request) {
 			m.lock.RLock()
@@ -248,12 +221,56 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 			_ = json.NewEncoder(w).Encode(balances)
 		})
 
+		mux.HandleFunc("/inbox", func(w http.ResponseWriter, _ *http.Request) {
+			log.Printf("[inbox] meshDaemon=%p inbox_len=%d", m, len(m.inbox))
+
+			m.lock.RLock()
+			defer m.lock.RUnlock()
+			_ = json.NewEncoder(w).Encode(m.inbox)
+		})
+
+		mux.HandleFunc("/debug/inject", func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			msg := strings.TrimSpace(string(body))
+			if msg == "" {
+				http.Error(w, "empty body", http.StatusBadRequest)
+				return
+			}
+
+			id := fmt.Sprintf("%d-%s", time.Now().UnixNano(), m.id)
+
+			// Store locally so /inbox shows the injected message immediately
+			m.lock.Lock()
+			m.inbox = append(m.inbox, Message{
+				From: m.id,
+				To:   "broadcast",
+				Body: msg,
+				Time: time.Now(),
+			})
+			m.lock.Unlock()
+
+			// Mark seen + start gossip
+			m.markSeen(id)
+			m.gossipOrigin(msg, "broadcast", id, 3)
+
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "id": id})
+		})
+
+		// Production chain endpoints (TX/BLOCK/APPLY/VERIFY contracts)
+		m.registerChainHandlers(mux)
+
+		m.httpSrv = &http.Server{
+			Addr:    cfg.Debug,
+			Handler: mux,
+		}
+
 		go func() {
-			log.Println("[mesh] http API →", cfg.HttpListen)
 			if err := m.httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				log.Println("[mesh] http error:", err)
+				log.Println("[mesh] debug API error:", err)
 			}
 		}()
+
+		log.Println("[mesh] debug API →", cfg.Debug)
 	}
 
 	return m, nil
