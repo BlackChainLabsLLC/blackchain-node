@@ -10,23 +10,31 @@ LATEST=$(curl -s https://api.github.com/repos/$REPO/releases/latest | grep tag_n
 ARCH=$(uname -m)
 
 if [ "$ARCH" = "x86_64" ]; then
-  FILE="blacknetd-linux-amd64"
+  NET="blacknetd-linux-amd64"
+  CTL="blackctl-linux-amd64"
+  SIG="signtx-linux-amd64"
 elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
-  FILE="blacknetd-linux-arm64"
+  NET="blacknetd-linux-arm64"
+  CTL="blackctl-linux-arm64"
+  SIG="signtx-linux-arm64"
 else
   echo "Unsupported architecture: $ARCH"
   exit 1
 fi
 
-URL="https://github.com/$REPO/releases/download/$LATEST/$FILE"
+download_and_install () {
+  FILE=$1
+  URL="https://github.com/$REPO/releases/download/$LATEST/$FILE"
 
-echo "Downloading $FILE..."
-curl -L $URL -o blacknetd
+  echo "Downloading $FILE..."
+  curl -L $URL -o $FILE
+  chmod +x $FILE
+  sudo mv $FILE /usr/local/bin/${FILE%%-*}
+}
 
-chmod +x blacknetd
-
-echo "Installing binary..."
-sudo mv blacknetd /usr/local/bin/blacknetd
+download_and_install $NET
+download_and_install $CTL
+download_and_install $SIG
 
 echo "Creating node directory..."
 sudo mkdir -p /var/lib/blackchain
@@ -59,11 +67,16 @@ echo "Starting node..."
 sudo systemctl start blacknetd
 
 echo ""
-echo "BlackChain node installed and running!"
+echo "BlackChain node installed!"
 echo ""
 
-echo "Check node status:"
+echo "Node status:"
 echo "  systemctl status blacknetd"
+
+echo ""
+echo "CLI tools installed:"
+echo "  blackctl"
+echo "  signtx"
 
 echo ""
 echo "View logs:"
