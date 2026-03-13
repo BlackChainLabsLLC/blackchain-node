@@ -13,8 +13,7 @@ jobs:
 
     strategy:
       matrix:
-        goos: [linux]
-        goarch: [amd64, arm64]
+        arch: [amd64, arm64]
 
     steps:
 
@@ -29,11 +28,11 @@ jobs:
       - name: Build BlackChain Node
         run: |
           mkdir -p build
-          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
-          go build -o build/blackchain-node-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd
+          GOOS=linux GOARCH=${{ matrix.arch }} \
+          go build -o build/blackchain-node-linux-${{ matrix.arch }} ./cmd/blackchain-node
 
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
-          name: blackchain-node-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: blackchain-node-linux-${{ matrix.arch }}
           path: build/
