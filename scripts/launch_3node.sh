@@ -1,22 +1,55 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -e
 
-cd /mnt/blacknet/projects/blackchain
+echo "======================================"
+echo "BLACKCHAIN 3-NODE DEMO"
+echo "======================================"
 
-echo "[+] Killing old nodes (safe)"
-pkill -f blacknetd 2>/dev/null || true
-sleep 1
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
 
-echo "[+] Launching Node 1"
-./cmd/blacknetd/blacknetd daemon --mesh-config config/mesh.json > logs/node1.log 2>&1 &
+mkdir -p config
+mkdir -p data/node1 data/node2 data/node3
 
-echo "[+] Launching Node 2"
-./cmd/blacknetd/blacknetd daemon --mesh-config config/mesh-node2.json > logs/node2.log 2>&1 &
+cat > config/node1.json <<EOF
+{
+  "node_id": "node1",
+  "listen": "127.0.0.1:7070",
+  "http_api": "127.0.0.1:6060",
+  "peers": ["127.0.0.1:7071","127.0.0.1:7072"],
+  "data_dir": "data/node1"
+}
+EOF
 
-echo "[+] Launching Node 3"
-./cmd/blacknetd/blacknetd daemon --mesh-config config/mesh-node3.json > logs/node3.log 2>&1 &
+cat > config/node2.json <<EOF
+{
+  "node_id": "node2",
+  "listen": "127.0.0.1:7071",
+  "http_api": "127.0.0.1:6061",
+  "peers": ["127.0.0.1:7070","127.0.0.1:7072"],
+  "data_dir": "data/node2"
+}
+EOF
 
-sleep 1
-echo "[✓] All 3 nodes launched. Check logs/ for activity."
+cat > config/node3.json <<EOF
+{
+  "node_id": "node3",
+  "listen": "127.0.0.1:7072",
+  "http_api": "127.0.0.1:6062",
+  "peers": ["127.0.0.1:7070","127.0.0.1:7071"],
+  "data_dir": "data/node3"
+}
+EOF
 
+echo
+echo "Launching nodes..."
+
+./blacknetd -config config/node1.json &
+./blacknetd -config config/node2.json &
+./blacknetd -config config/node3.json &
+
+echo
+echo "3-node network running"
+echo
+wait
 
