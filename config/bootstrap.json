@@ -1,0 +1,7 @@
+{
+  "bootstrap_peers": [
+    "bootstrap1.blackchainlabsllc.com:9000",
+    "bootstrap2.blackchainlabsllc.com:9000",
+    "bootstrap3.blackchainlabsllc.com:9000"
+  ]
+}
