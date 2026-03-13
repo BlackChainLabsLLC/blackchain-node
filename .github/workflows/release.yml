@@ -1,0 +1,36 @@
+name: Release BlackChain Node
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build binaries
+        run: |
+          mkdir -p build
+
+          GOOS=linux GOARCH=${{ matrix.arch }} go build -o build/blacknetd-linux-${{ matrix.arch }} ./cmd/blacknetd
+          GOOS=linux GOARCH=${{ matrix.arch }} go build -o build/blackctl-linux-${{ matrix.arch }} ./cmd/blackctl
+          GOOS=linux GOARCH=${{ matrix.arch }} go build -o build/signtx-linux-${{ matrix.arch }} ./cmd/signtx
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/*
