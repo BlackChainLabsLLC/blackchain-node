@@ -327,7 +327,7 @@ func (m *meshDaemon) discoveryLeaderLoop(ctx context.Context) {
 			var cerr error
 			if err := rc.Control(func(fd uintptr) {
 				_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
-				_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEPORT, 1)
+				_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, 0x0F, 1)
 			}); err != nil {
 				cerr = err
 			}
