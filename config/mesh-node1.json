@@ -1,8 +1,15 @@
 {
-  "listen": "127.0.0.1:55211",
-  "debug":  ":6060",
+  "dataDir": "data/node1",
+  "http_listen": "127.0.0.1:6060",
+  "listen": "127.0.0.1:7070",
+  "node_id": "node1",
   "peers": [
-    "127.0.0.1:55212",
-    "127.0.0.1:55213"
-  ]
+    "127.0.0.1:7071"
+  ],
+  "tls": {
+    "ca_file": "data/ca/ca.crt",
+    "cert_file": "data/node1/tls.crt",
+    "enabled": true,
+    "key_file": "data/node1/tls.key"
+  }
 }
