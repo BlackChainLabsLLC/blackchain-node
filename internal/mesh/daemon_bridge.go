@@ -28,11 +28,10 @@ type DaemonNode interface {
 type Peer struct {
 	Addr      string    `json:"addr"`
 	LastSeen  time.Time `json:"last_seen"`
-	Connected bool      `json:"connected"` // activity-based
-	Reachable bool      `json:"reachable"` // dial-based
+	Connected bool      `json:"connected"`
+	Reachable bool      `json:"reachable"`
 }
 
-// RouteEntry is a simple 1-hop view of neighbors for the debug API.
 type RouteEntry struct {
 	PeerID     string    `json:"PeerID"`
 	NextHop    string    `json:"NextHop"`
@@ -41,7 +40,6 @@ type RouteEntry struct {
 }
 
 type meshDaemon struct {
-	// Phase 6: optional mTLS transport
 	tlsCfg         *MeshTLS
 	walletAddr     string
 	bootstrapPeers []string
@@ -50,32 +48,23 @@ type meshDaemon struct {
 	lock           sync.RWMutex
 	httpSrv        *http.Server
 
-	// Identity + messaging support (expected by messages.go / gossip.go / reputation.go / seen.go)
 	id     string
 	nodeID string
 	inbox  []Message
 	seen   map[string]time.Time
 
-	// Reputation + UC (expected by reputation.go)
 	repMu      sync.Mutex
 	reputation map[string]*Reputation
 	uc         map[string]*UCRecord
 
-	// blockchain
 	chain *ProductionChain
 
-	// signed state gossip (Phase O.3)
 	peerStateMu sync.Mutex
 	peerState   map[string]SignedStateAnnouncement
 
-	// blockchain
-
-	// blockchain
-
-	// chain persistence
 	dataDir    string
 	persistDir string
-	// discovery subsystem
+
 	discoMu    sync.RWMutex
 	discoCfg   discoveryConfig
 	discoPeers map[string]discoveredPeer
@@ -84,6 +73,7 @@ type meshDaemon struct {
 /* ===================== START DAEMON ===================== */
 
 func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, error) {
+
 	cfg, err := LoadMeshConfig(opts.MeshConfigPath)
 	if err != nil {
 		return nil, err
@@ -94,16 +84,11 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 		return nil, fmt.Errorf("listen %s: %w", cfg.Listen, err)
 	}
 
-	// Node name (used for default data dir), NOT necessarily network identity.
 	nodeName := strings.TrimSpace(cfg.NodeID)
 	if nodeName == "" {
 		nodeName = "node1"
 	}
 
-	// Phase AA: DataDir authority
-	// 1) CLI (--data) wins
-	// 2) config DataDir next
-	// 3) default: data/<nodeName>
 	dataDir := strings.TrimSpace(opts.DataDir)
 	if dataDir == "" {
 		dataDir = strings.TrimSpace(cfg.DataDir)
@@ -112,19 +97,48 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 		dataDir = filepath.Join("data", nodeName)
 	}
 
-	// Wallet (for coinbase payout address)
 	walletPath := filepath.Join(dataDir, "wallet.json")
+
 	w, err := crypto.LoadOrCreateWallet(walletPath)
 	if err != nil {
 		return nil, err
 	}
+
+	/* ===================== BOOTSTRAP PEERS ===================== */
+
+	bootstrapPeers := LoadBootstrapPeers()
+
+	// merge config peers + bootstrap peers
+	peerSet := map[string]struct{}{}
+
+	for _, p := range cfg.Peers {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			peerSet[p] = struct{}{}
+		}
+	}
+
+	for _, p := range bootstrapPeers {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			peerSet[p] = struct{}{}
+		}
+	}
+
+	finalPeers := make([]string, 0, len(peerSet))
+	for p := range peerSet {
+		finalPeers = append(finalPeers, p)
+	}
+
+	/* ===================== DAEMON INIT ===================== */
+
 	m := &meshDaemon{
 		tlsCfg:         cfg.TLS,
 		chain:          newProductionChain(),
 		dataDir:        dataDir,
 		walletAddr:     w.Address,
 		persistDir:     cfg.PersistDir,
-		bootstrapPeers: cfg.Peers,
+		bootstrapPeers: finalPeers,
 
 		listener:   ln,
 		peers:      make(map[string]*Peer),
@@ -135,53 +149,54 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 		reputation: make(map[string]*Reputation),
 		uc:         make(map[string]*UCRecord),
 	}
-	m.chain.ensureGenesisLocked()
 
+	m.chain.ensureGenesisLocked()
 	m.chain.daemon = m
 
-	// Persistence roots into chain
 	m.chain.dataDir = m.dataDir
 	m.chain.persistDir = m.persistDir
 
-	// Load snapshot if present, then replay blocks
 	if _, err := m.chain.LoadSnapshotFromDisk(); err != nil {
 		return nil, err
 	}
+
 	if err := m.chain.loadFromDisk(); err != nil {
 		return nil, err
 	}
 
-	// LOCK: snapshot/load may re-init chain internals; re-bind daemon after load.
 	m.chain.daemon = m
 
-	// Seed local validator into deterministic validatorSet (so quorum math never starts at 0)
 	m.chain.mu.Lock()
+
 	localID := m.chain.ValidatorIDLocked()
 	if localID != "" && localID != "ERR_NO_VALIDATOR" {
 		m.chain.observeValidatorLocked(localID)
 	}
+
 	m.chain.mu.Unlock()
 
 	m.startLivenessLoop()
 	m.startSignedStateLoop()
 
-	// Outbound peering bootstrap + sync
-	if len(cfg.Peers) > 0 {
-		go m.ConnectToPeers(cfg.Peers)
+	/* ===================== PEER BOOTSTRAP ===================== */
+
+	if len(m.bootstrapPeers) > 0 {
+
+		log.Println("[mesh] bootstrap peers:", m.bootstrapPeers)
+
+		go m.ConnectToPeers(m.bootstrapPeers)
 		go m.bootstrapSync(ctx)
 
-		// discovery promotion + eviction
 		go m.discoveryPromoteLoop(ctx)
 		go m.discoveryEvictDeadLoop(ctx)
-		log.Println("[mesh] dialing peers:", cfg.Peers)
 	}
 
 	log.Println("[mesh] listening on", cfg.Listen)
 
-	// Inbound accept loop
 	go func() {
 		for {
 			conn, err := ln.Accept()
+
 			if err != nil {
 				select {
 				case <-ctx.Done():
@@ -191,16 +206,16 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 					return
 				}
 			}
+
 			go m.handleIncoming(conn)
 		}
 	}()
 
-	// HTTP Debug API (optional)
-	if cfg.HttpListen != "" {
-		mux := http.NewServeMux()
+	/* ===================== HTTP DEBUG API ===================== */
 
-		// DEBUG: wallet + daemon binding (LEGO proof)
-		// Register on BOTH mux and DefaultServeMux so we cannot get 404 regardless of which mux is live.
+	if cfg.HttpListen != "" {
+
+		mux := http.NewServeMux()
 
 		m.registerChainHandlers(mux)
 
@@ -216,15 +231,20 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 		})
 
 		mux.HandleFunc("/routes", func(w http.ResponseWriter, _ *http.Request) {
+
 			m.lock.RLock()
 			defer m.lock.RUnlock()
 
 			routes := make([]RouteEntry, 0, len(m.peers))
+
 			for addr, p := range m.peers {
+
 				last := p.LastSeen
+
 				if last.IsZero() {
 					last = time.Now()
 				}
+
 				routes = append(routes, RouteEntry{
 					PeerID:     addr,
 					NextHop:    addr,
@@ -238,21 +258,14 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 			})
 		})
 
-		mux.HandleFunc("/reputation", func(w http.ResponseWriter, _ *http.Request) {
-			reps := m.snapshotReputation()
-			_ = json.NewEncoder(w).Encode(reps)
-		})
-
-		mux.HandleFunc("/uc", func(w http.ResponseWriter, _ *http.Request) {
-			balances := m.snapshotUC()
-			_ = json.NewEncoder(w).Encode(balances)
-		})
-
 		go func() {
+
 			log.Println("[mesh] http API →", cfg.HttpListen)
+
 			if err := m.httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				log.Println("[mesh] http error:", err)
 			}
+
 		}()
 	}
 
@@ -262,11 +275,14 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 /* ===================== SHUTDOWN ===================== */
 
 func (m *meshDaemon) Shutdown(ctx context.Context) error {
+
 	if m.httpSrv != nil {
 		_ = m.httpSrv.Shutdown(ctx)
 	}
+
 	if m.listener != nil {
 		return m.listener.Close()
 	}
+
 	return nil
 }
