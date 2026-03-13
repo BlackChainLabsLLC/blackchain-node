@@ -1,3 +1,18 @@
+# BlackChain Labs
+
+BlackChain Labs builds decentralized infrastructure for edge computing, mesh networking, and AI-driven economic systems.
+
+### 🌐 Links
+
+Website  
+https://BlackChainLabsLLC.com
+
+Node Network  
+https://NodeTheGlobe.com
+
+GitHub  
+https://github.com/BlackChainLabsLLC
+
 # BlackChain Node
 
 BlackChain Node is the core infrastructure daemon for the BlackChain protocol — a decentralized mesh-network blockchain designed for resilient peer-to-peer infrastructure and edge devices.
