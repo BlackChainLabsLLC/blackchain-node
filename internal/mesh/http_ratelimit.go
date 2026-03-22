@@ -142,7 +142,8 @@ func write429(w http.ResponseWriter) {
 func buildHTTPMiddleware(cfg *MeshConfig) func(http.Handler) http.Handler {
 	rl := newHTTPRateLimiter(cfg.HttpRateLimitRPS, cfg.HttpRateLimitBurst)
 
-	enabled := true
+	// SOLOMON FIX: respect config — fully disable middleware if off
+	enabled := cfg.HttpRateLimitEnabled
 	// if user explicitly disabled, they will also likely include the field.
 	// honor explicit disable only when rps/burst fields exist or enable flag is present in config file.
 	// easiest deterministic behavior: if cfg.HttpRateLimitEnabled == false AND cfg.HttpRateLimitRPS == 0 AND cfg.HttpRateLimitBurst == 0 => legacy -> enabled.
