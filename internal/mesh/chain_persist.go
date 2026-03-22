@@ -1,13 +1,14 @@
 package mesh
 
 import (
+	"regexp"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
 )
-
 func (c *ProductionChain) blockDir() string {
 	root := c.persistDir
 	if root == "" {
@@ -38,6 +39,7 @@ func (c *ProductionChain) persistBlockLocked(b Block) error {
 }
 
 func (c *ProductionChain) loadFromDisk() error {
+	exactBlockJSONNameRE := regexp.MustCompile(`^[0-9]+\.json$`)
 	dir := c.blockDir()
 	ents, err := os.ReadDir(dir)
 	if err != nil {
@@ -54,13 +56,22 @@ func (c *ProductionChain) loadFromDisk() error {
 	var files []pair
 
 	for _, e := range ents {
+		name := e.Name()
+		if !exactBlockJSONNameRE.MatchString(name) {
+			continue
+		}
 		var h int64
-		if _, err := fmt.Sscanf(e.Name(), "%d.json", &h); err == nil {
+		if _, err := fmt.Sscanf(name, "%d.json", &h); err == nil {
 			files = append(files, pair{h: h, p: filepath.Join(dir, e.Name())})
 		}
 	}
 
 	sort.Slice(files, func(i, j int) bool { return files[i].h < files[j].h })
+
+	maxH := int64(-1)
+	if len(files) > 0 {
+		maxH = files[len(files)-1].h
+	}
 
 	for _, f := range files {
 		raw, err := os.ReadFile(f.p)
@@ -69,7 +80,11 @@ func (c *ProductionChain) loadFromDisk() error {
 		}
 		var b Block
 		if err := json.Unmarshal(raw, &b); err != nil {
-			return err
+			if f.h == maxH {
+				log.Printf("[chain] skipping malformed tail block height=%d path=%s err=%v", f.h, f.p, err)
+				continue
+			}
+			return fmt.Errorf("replay decode height %d path %s: %w", f.h, f.p, err)
 		}
 		if err := c.applyBlockLocked(b); err != nil {
 			return fmt.Errorf("replay height %d: %w", b.Height, err)

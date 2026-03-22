@@ -1,15 +1,16 @@
 package mesh
 
 import (
+	"regexp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
 )
-
 type ChainSnapshot struct {
 	Height       int64              `json:"height"`
 	Hash         string             `json:"hash"`
@@ -68,6 +69,7 @@ func (c *ProductionChain) SaveSnapshotLocked() error {
 // LoadSnapshotFromDisk attempts to load snapshot.json and apply it as chain base.
 // This resets in-memory state to snapshot, then replays any persisted blocks ABOVE snapshot height.
 func (c *ProductionChain) LoadSnapshotFromDisk() (bool, error) {
+	exactBlockJSONNameRE := regexp.MustCompile(`^[0-9]+\.json$`)
 	path := c.snapshotPath()
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -122,12 +124,21 @@ func (c *ProductionChain) LoadSnapshotFromDisk() (bool, error) {
 	}
 	var files []pair
 	for _, e := range ents {
+		name := e.Name()
+		if !exactBlockJSONNameRE.MatchString(name) {
+			continue
+		}
 		var h int64
-		if _, err := fmt.Sscanf(e.Name(), "%d.json", &h); err == nil && h > snap.Height {
+		if _, err := fmt.Sscanf(name, "%d.json", &h); err == nil && h > snap.Height {
 			files = append(files, pair{h: h, p: filepath.Join(dir, e.Name())})
 		}
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].h < files[j].h })
+
+	maxH := int64(-1)
+	if len(files) > 0 {
+		maxH = files[len(files)-1].h
+	}
 
 	for _, f := range files {
 		raw, err := os.ReadFile(f.p)
@@ -136,7 +147,11 @@ func (c *ProductionChain) LoadSnapshotFromDisk() (bool, error) {
 		}
 		var b Block
 		if err := json.Unmarshal(raw, &b); err != nil {
-			return false, err
+			if f.h == maxH {
+				log.Printf("[snapshot] skipping malformed tail block height=%d path=%s err=%v", f.h, f.p, err)
+				continue
+			}
+			return false, fmt.Errorf("replay post-snapshot decode height %d path %s: %w", f.h, f.p, err)
 		}
 		// Use full validation
 		if err := c.applyBlockLocked(b); err != nil {
