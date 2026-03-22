@@ -1,6 +1,8 @@
 package mesh
 
 import (
+	"io"
+	"errors"
 	"context"
 	"encoding/json"
 	"log"
@@ -155,4 +157,34 @@ func itoa64(v int64) string {
 		buf[i] = '-'
 	}
 	return string(buf[i:])
+}
+
+
+func isBenignJSONPeerErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+	if strings.Contains(msg, "unexpected end of JSON input") {
+		return true
+	}
+	if strings.Contains(msg, "unexpected EOF") {
+		return true
+	}
+	if strings.Contains(msg, "connection reset by peer") {
+		return true
+	}
+	if strings.Contains(msg, "broken pipe") {
+		return true
+	}
+	if strings.Contains(msg, "context deadline exceeded") {
+		return true
+	}
+	if strings.Contains(msg, "i/o timeout") {
+		return true
+	}
+	return false
 }

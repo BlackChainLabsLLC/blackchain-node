@@ -11,12 +11,10 @@ func normalizeHost(h string) string {
 	if h == "" {
 		return h
 	}
-	// Treat common loopback spellings as equivalent.
 	switch strings.ToLower(h) {
 	case "localhost":
 		return "127.0.0.1"
 	}
-	// Treat bind-all as wildcard-ish for matching.
 	if h == "0.0.0.0" || h == "::" {
 		return ""
 	}
@@ -42,78 +40,50 @@ func equivalentPeerAddr(a, b string) bool {
 	ha, pa, oka := splitHostPortLoose(a)
 	hb, pb, okb := splitHostPortLoose(b)
 	if !oka || !okb {
-		// Fallback exact match if parsing fails
 		return strings.TrimSpace(a) == strings.TrimSpace(b)
 	}
 	if pa == "" || pb == "" || pa != pb {
 		return false
 	}
-
-	// If either host is wildcard/empty, match on port.
 	if ha == "" || hb == "" {
 		return true
 	}
-
-	// Exact host match after normalization.
 	return ha == hb
 }
 
-// TouchPeer = ACTIVITY (real traffic only)
+// TouchPeer = real traffic observed.
 func (m *meshDaemon) TouchPeer(addr string) {
 	addr = strings.TrimSpace(addr)
 	if addr == "" {
 		return
 	}
 
-	for _, bp := range m.bootstrapPeers {
-		if equivalentPeerAddr(bp, addr) {
-			m.lock.Lock()
-			defer m.lock.Unlock()
+	m.lock.Lock()
+	defer m.lock.Unlock()
 
-			// Store by the canonical bootstrap key to keep /peers stable.
-			key := strings.TrimSpace(bp)
-			if key == "" {
-				key = addr
-			}
-
-			p, ok := m.peers[key]
-			if !ok {
-				p = &Peer{Addr: key}
-				m.peers[key] = p
-			}
-
-			p.Connected = true
-			p.LastSeen = time.Now()
-			return
-		}
+	p, ok := m.peers[addr]
+	if !ok {
+		p = &Peer{Addr: addr}
+		m.peers[addr] = p
 	}
+	p.Connected = true
+	p.LastSeen = time.Now()
 }
 
-// TouchReachable = DIAL success only (NO activity)
+// TouchReachable = dial success/failure observed.
 func (m *meshDaemon) TouchReachable(addr string, ok bool) {
 	addr = strings.TrimSpace(addr)
 	if addr == "" {
 		return
 	}
 
-	for _, bp := range m.bootstrapPeers {
-		if equivalentPeerAddr(bp, addr) {
-			m.lock.Lock()
-			defer m.lock.Unlock()
+	m.lock.Lock()
+	defer m.lock.Unlock()
 
-			key := strings.TrimSpace(bp)
-			if key == "" {
-				key = addr
-			}
-
-			p, exists := m.peers[key]
-			if !exists {
-				p = &Peer{Addr: key}
-				m.peers[key] = p
-			}
-
-			p.Reachable = ok
-			return
-		}
+	p, exists := m.peers[addr]
+	if !exists {
+		p = &Peer{Addr: addr}
+		m.peers[addr] = p
 	}
+	p.Reachable = ok
 }

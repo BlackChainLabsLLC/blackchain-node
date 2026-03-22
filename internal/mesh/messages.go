@@ -1,6 +1,7 @@
 package mesh
 
 import (
+	"errors"
 	"bufio"
 	"bytes"
 	"encoding/json"
@@ -140,7 +141,7 @@ func (m *meshDaemon) handleIncoming(conn net.Conn) {
 
 // maybeSyncFromSignedState inspects a "msg" body that might actually be a SignedStateAnnouncement.
 // If the peer is ahead, it pulls missing blocks from the peer's API and applies them locally.
-// Convention: peer mesh port 707x maps to API port 606x (delta -1010).
+// Convention: peer mesh port 7072..7076 maps to API port 6060..6064 (delta -1012).
 func (m *meshDaemon) maybeSyncFromSignedState(via string, body string) bool {
 	var ssa SignedStateAnnouncement
 	if err := json.Unmarshal([]byte(body), &ssa); err != nil {
@@ -164,7 +165,7 @@ func (m *meshDaemon) maybeSyncFromSignedState(via string, body string) bool {
 	if err != nil {
 		return true
 	}
-	apiPort := p - 1010
+	apiPort := p - 1012
 	if apiPort <= 0 {
 		return true
 	}
@@ -207,4 +208,31 @@ func (m *meshDaemon) maybeSyncFromSignedState(via string, body string) bool {
 	}
 
 	return true
+}
+
+
+func benignHandleIncomingErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+	if strings.Contains(msg, "unexpected end of JSON input") {
+		return true
+	}
+	if strings.Contains(msg, "unexpected EOF") {
+		return true
+	}
+	if strings.Contains(msg, "connection reset by peer") {
+		return true
+	}
+	if strings.Contains(msg, "broken pipe") {
+		return true
+	}
+	if strings.Contains(msg, "i/o timeout") {
+		return true
+	}
+	return false
 }
