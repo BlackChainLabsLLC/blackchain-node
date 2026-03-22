@@ -26,10 +26,13 @@ type DaemonNode interface {
 }
 
 type Peer struct {
-	Addr      string    `json:"addr"`
-	LastSeen  time.Time `json:"last_seen"`
-	Connected bool      `json:"connected"`
-	Reachable bool      `json:"reachable"`
+	Addr            string    `json:"addr"`
+	LastSeen        time.Time `json:"last_seen"`
+	Connected       bool      `json:"connected"`
+	Reachable       bool      `json:"reachable"`
+	TrafficRecently bool      `json:"traffic_recently,omitempty"`
+	LastSeenAgeSec  int64     `json:"last_seen_age_sec,omitempty"`
+	ObservedState   string    `json:"observed_state,omitempty"`
 }
 
 type RouteEntry struct {
@@ -78,6 +81,14 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 	if err != nil {
 		return nil, err
 	}
+
+	// ===== CONFIG SNAPSHOT (SOURCE OF TRUTH) =====
+	log.Println("[mesh] ===== CONFIG SNAPSHOT =====")
+	log.Println("[mesh] node_id =", cfg.NodeID)
+	log.Println("[mesh] listen  =", cfg.Listen)
+	log.Println("[mesh] http    =", cfg.HttpListen)
+	log.Println("[mesh] peers   =", cfg.Peers)
+	log.Println("[mesh] =================================")
 
 	ln, err := meshListen(cfg.Listen, cfg.TLS)
 	if err != nil {
@@ -130,6 +141,13 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 		finalPeers = append(finalPeers, p)
 	}
 
+	/* ===================== INITIAL PEER MAP ===================== */
+
+	peers := make(map[string]*Peer, len(peerSet))
+	for p := range peerSet {
+		peers[p] = &Peer{Addr: p}
+	}
+
 	/* ===================== DAEMON INIT ===================== */
 
 	m := &meshDaemon{
@@ -141,7 +159,7 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 		bootstrapPeers: finalPeers,
 
 		listener:   ln,
-		peers:      make(map[string]*Peer),
+		peers:      peers,
 		id:         cfg.Listen,
 		nodeID:     nodeName,
 		inbox:      make([]Message, 0, 128),
@@ -177,6 +195,7 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 
 	m.startLivenessLoop()
 	m.startSignedStateLoop()
+	m.startProposerLoop()
 
 	/* ===================== PEER BOOTSTRAP ===================== */
 
@@ -213,6 +232,12 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 
 	/* ===================== HTTP DEBUG API ===================== */
 
+	// ===== FORCE HTTP LISTEN INVARIANT =====
+	if strings.TrimSpace(cfg.HttpListen) == "" {
+		cfg.HttpListen = ":6060"
+		log.Println("[mesh] http_listen was empty → defaulting to", cfg.HttpListen)
+	}
+
 	if cfg.HttpListen != "" {
 
 		mux := http.NewServeMux()
@@ -224,10 +249,74 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 			Handler: buildHTTPMiddleware(cfg)(mux),
 		}
 
-		mux.HandleFunc("/peers", func(w http.ResponseWriter, _ *http.Request) {
+		mux.HandleFunc("/peers", func(w http.ResponseWriter, r *http.Request) {
+
+			if r.Method == http.MethodPost {
+
+				var req struct {
+					Addr string `json:"addr"`
+				}
+
+				_ = json.NewDecoder(r.Body).Decode(&req)
+
+				addr := strings.TrimSpace(req.Addr)
+
+				if addr != "" {
+
+					m.lock.Lock()
+
+					if _, ok := m.peers[addr]; !ok {
+						m.TouchReachable(addr, true)
+
+						exists := false
+						for _, bp := range m.bootstrapPeers {
+							if bp == addr {
+								exists = true
+								break
+							}
+						}
+
+						if !exists {
+							m.bootstrapPeers = append(m.bootstrapPeers, addr)
+						}
+					}
+
+					m.lock.Unlock()
+
+					go m.ConnectToPeers([]string{addr})
+				}
+			}
+
 			m.lock.RLock()
-			defer m.lock.RUnlock()
-			_ = json.NewEncoder(w).Encode(m.peers)
+			out := make(map[string]Peer, len(m.peers))
+			now := time.Now()
+			for addr, p := range m.peers {
+				pp := *p
+				if !pp.LastSeen.IsZero() {
+					age := int64(now.Sub(pp.LastSeen) / time.Second)
+					if age < 0 {
+						age = 0
+					}
+					pp.LastSeenAgeSec = age
+					pp.TrafficRecently = now.Sub(pp.LastSeen) <= LivenessWindow
+				}
+				switch {
+				case pp.Connected && pp.Reachable && pp.TrafficRecently:
+					pp.ObservedState = "healthy"
+				case pp.Reachable && pp.TrafficRecently:
+					pp.ObservedState = "reachable_recent_traffic"
+				case pp.Reachable:
+					pp.ObservedState = "reachable_no_recent_traffic"
+				case pp.Connected:
+					pp.ObservedState = "connected_state_only"
+				default:
+					pp.ObservedState = "stale_or_unreachable"
+				}
+				out[addr] = pp
+			}
+			m.lock.RUnlock()
+
+			_ = json.NewEncoder(w).Encode(out)
 		})
 
 		mux.HandleFunc("/routes", func(w http.ResponseWriter, _ *http.Request) {
@@ -285,4 +374,43 @@ func (m *meshDaemon) Shutdown(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// startPeerDialLoop periodically attempts connections to all known peers.
+// Source of truth is m.peers, not only bootstrapPeers.
+func (m *meshDaemon) startPeerDialLoop() {
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			m.lock.Lock()
+			peers := make([]string, 0, len(m.peers))
+			for addr := range m.peers {
+				addr = strings.TrimSpace(addr)
+				if addr != "" {
+					peers = append(peers, addr)
+				}
+			}
+			m.lock.Unlock()
+
+			for _, addr := range peers {
+				if addr == "" {
+					continue
+				}
+
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				conn, err := meshDialTimeout(ctx, addr, 2*time.Second, m.tlsCfg)
+				if err != nil {
+					m.TouchReachable(addr, false)
+					cancel()
+					continue
+				}
+
+				_ = conn.Close()
+				m.TouchReachable(addr, true)
+				cancel()
+			}
+		}
+	}()
 }
