@@ -34,6 +34,7 @@ func main() {
 
 	to := flag.String("to", "", "to address")
 	amount := flag.Int64("amount", 0, "amount")
+	fee := flag.Int64("fee", 1, "transaction fee")
 
 	flag.Parse()
 	args := flag.Args()
@@ -110,9 +111,47 @@ func main() {
 		return
 	}
 
+	// ---------------- CHAIN STATUS ----------------
+	if cmd == "status" {
+		r, err := client.Get(base + "/chain/status")
+		if err != nil {
+			panic(err)
+		}
+		defer r.Body.Close()
+		out, _ := io.ReadAll(r.Body)
+		fmt.Println(string(out))
+		return
+	}
+
+	// ---------------- MESH PEERS ----------------
+	if cmd == "peers" {
+		r, err := client.Get(base + "/peers")
+		if err != nil {
+			panic(err)
+		}
+		defer r.Body.Close()
+		out, _ := io.ReadAll(r.Body)
+		fmt.Println(string(out))
+		return
+	}
+
+	// ---------------- TOPOLOGY ----------------
+	if cmd == "topology" {
+		r, err := client.Get(base + "/peers")
+		if err != nil {
+			panic(err)
+		}
+		defer r.Body.Close()
+		body, _ := io.ReadAll(r.Body)
+		fmt.Println("BlackChain Network Topology")
+		fmt.Println("==========================")
+		fmt.Println(string(body))
+		return
+	}
+
 	// ---------------- CHAIN TX ----------------
 	if cmd == "tx" {
-		// Fallback: extract --wallet, --to, --amount from args if flags missing
+		// Fallback: extract --wallet, --to, --amount, --fee from args if flags missing
 		for i := 0; i < len(args)-1; i++ {
 			if *walletPath == "" && args[i] == "--wallet" {
 				*walletPath = args[i+1]
@@ -122,6 +161,9 @@ func main() {
 			}
 			if *amount == 0 && args[i] == "--amount" {
 				fmt.Sscan(args[i+1], amount)
+			}
+			if *fee == 1 && args[i] == "--fee" {
+				fmt.Sscan(args[i+1], fee)
 			}
 		}
 
@@ -134,30 +176,36 @@ func main() {
 		if *amount <= 0 {
 			panic("bad --amount")
 		}
+		if *fee < 0 {
+			panic("bad --fee")
+		}
 
 		w, err := crypto.LoadWallet(*walletPath)
 		if err != nil {
 			panic(err)
 		}
 
-		// fetch account (balance + nonce)
-		ar, err := client.Get(base + "/chain/account?addr=" + w.Address)
+		// fetch nonce from balances (authoritative)
+		br, err := client.Get(base + "/chain/balances")
 		if err != nil {
 			panic(err)
 		}
-		defer ar.Body.Close()
+		defer br.Body.Close()
 
-		var acct struct {
+		var bals map[string]struct {
 			Balance int64 `json:"balance"`
 			Nonce   int64 `json:"nonce"`
 		}
-		_ = json.NewDecoder(ar.Body).Decode(&acct)
+
+		_ = json.NewDecoder(br.Body).Decode(&bals)
+		acct := bals[w.Address]
 
 		tx, err := mesh.SignTx(
 			w.Address,
 			*to,
 			*amount,
 			acct.Nonce,
+			*fee,
 			w.PubHex,
 			w.PrivHex,
 		)
@@ -240,7 +288,10 @@ func usage() {
 	fmt.Println(" blackctl wallet-show wallet.json")
 	fmt.Println(" blackctl wallet-addr wallet.json")
 	fmt.Println(" blackctl chain height")
-	fmt.Println(" blackctl chain tx --wallet wallet.json --to <addr> --amount 5")
+	fmt.Println(" blackctl chain status")
+	fmt.Println(" blackctl chain peers")
+	fmt.Println(" blackctl chain topology")
+	fmt.Println(" blackctl chain tx --wallet wallet.json --to <addr> --amount 5 --fee 1")
 	fmt.Println(" blackctl chain propose")
 	fmt.Println(" blackctl chain block --height 1    (or: blackctl chain block 1)")
 	fmt.Println("")

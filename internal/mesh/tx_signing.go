@@ -89,7 +89,7 @@ func VerifyTx(tx Tx) error {
 
 // SignTx creates PubKey+Signature on a tx using a wallet's raw keys (hex).
 // The wallet address must match the pubkey-derived address (checked on verify).
-func SignTx(fromAddr, to string, amount, nonce int64, pubHex, privHex string) (Tx, error) {
+func SignTx(fromAddr, to string, amount, nonce, fee int64, pubHex, privHex string) (Tx, error) {
 	if to == "" || amount <= 0 || nonce < 0 {
 		return Tx{}, fmt.Errorf("bad tx inputs")
 	}
@@ -115,6 +115,7 @@ func SignTx(fromAddr, to string, amount, nonce int64, pubHex, privHex string) (T
 		To:     to,
 		Amount: amount,
 		Nonce:  nonce,
+		Fee:    fee,
 		PubKey: pubHex,
 	}
 	sig := ed25519.Sign(ed25519.PrivateKey(privRaw), txSignBytes(tx))
