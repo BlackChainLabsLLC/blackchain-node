@@ -3,6 +3,7 @@ package mesh
 import (
 	"blackchain/internal/crypto"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -240,6 +241,18 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 
 	if cfg.HttpListen != "" {
 
+		httpHost := "127.0.0.1"
+		if h, _, err := net.SplitHostPort(strings.TrimSpace(cfg.HttpListen)); err == nil && strings.TrimSpace(h) != "" {
+			httpHost = strings.TrimSpace(h)
+		} else if strings.TrimSpace(cfg.Host) != "" {
+			httpHost = strings.TrimSpace(cfg.Host)
+		}
+
+		httpCertPath, httpKeyPath, err := ensureHTTPServerTLSFiles(dataDir, httpHost)
+		if err != nil {
+			return nil, fmt.Errorf("http tls files: %w", err)
+		}
+
 		mux := http.NewServeMux()
 
 		m.registerChainHandlers(mux)
@@ -247,6 +260,9 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 		m.httpSrv = &http.Server{
 			Addr:    cfg.HttpListen,
 			Handler: buildHTTPMiddleware(cfg)(mux),
+			TLSConfig: &tls.Config{
+				MinVersion: tls.VersionTLS12,
+			},
 		}
 
 		mux.HandleFunc("/peers", func(w http.ResponseWriter, r *http.Request) {
@@ -351,7 +367,7 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 
 			log.Println("[mesh] http API →", cfg.HttpListen)
 
-			if err := m.httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			if err := m.httpSrv.ListenAndServeTLS(httpCertPath, httpKeyPath); err != nil && err != http.ErrServerClosed {
 				log.Println("[mesh] http error:", err)
 			}
 

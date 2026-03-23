@@ -1,15 +1,14 @@
 package mesh
 
 import (
-	"errors"
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
-	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -169,12 +168,13 @@ func (m *meshDaemon) maybeSyncFromSignedState(via string, body string) bool {
 	if apiPort <= 0 {
 		return true
 	}
-	base := fmt.Sprintf("http://%s:%d", host, apiPort)
+	base := fmt.Sprintf("https://%s:%d", host, apiPort)
 
 	// Pull and apply blocks (Lego-simple: sequential)
+	client := newInternalHTTPSClient(2 * time.Second)
 	for h := localH + 1; h <= int(ssa.Height); h++ {
 		url := fmt.Sprintf("%s/chain/block?h=%d", base, h)
-		resp, err := http.Get(url)
+		resp, err := client.Get(url)
 		if err != nil {
 			log.Printf("[sync] fetch error from=%s url=%s: %v", via, url, err)
 			return true
@@ -209,7 +209,6 @@ func (m *meshDaemon) maybeSyncFromSignedState(via string, body string) bool {
 
 	return true
 }
-
 
 func benignHandleIncomingErr(err error) bool {
 	if err == nil {

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"time"
@@ -100,4 +101,18 @@ func insecureInternalTLSConfig() *tls.Config {
 		InsecureSkipVerify: true, // transport encryption only; auth handled elsewhere
 		MinVersion:         tls.VersionTLS12,
 	}
+}
+
+func newInternalHTTPSClient(timeout time.Duration) *http.Client {
+	tr := &http.Transport{
+		TLSClientConfig: insecureInternalTLSConfig(),
+	}
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: tr,
+	}
+}
+
+func InsecureBlackctlTLSConfig() *tls.Config {
+	return insecureInternalTLSConfig()
 }

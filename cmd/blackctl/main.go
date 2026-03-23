@@ -16,13 +16,15 @@ import (
 )
 
 func main() {
-	// Allow env override (supports values like "127.0.0.1:6060" or "http://127.0.0.1:6060")
+	// Allow env override (supports values like "127.0.0.1:6060", "http://127.0.0.1:6060", or "https://127.0.0.1:6060")
 	envAPI := strings.TrimSpace(os.Getenv("BLACKCTL_API"))
-	envAddr := strings.TrimPrefix(envAPI, "http://")
-	envAddr = strings.TrimPrefix(envAddr, "https://")
 	defaultAddr := "127.0.0.1:6060"
-	if envAddr != "" {
-		defaultAddr = envAddr
+	if envAPI != "" {
+		envAddr := strings.TrimPrefix(envAPI, "http://")
+		envAddr = strings.TrimPrefix(envAddr, "https://")
+		if envAddr != "" {
+			defaultAddr = envAddr
+		}
 	}
 
 	addr := flag.String("addr", defaultAddr, "rpc address (host:port), or set BLACKCTL_API")
@@ -96,8 +98,17 @@ func main() {
 
 	cmd := args[1]
 
-	base := "http://" + *addr
+	base := *addr
+	if !strings.HasPrefix(base, "http://") && !strings.HasPrefix(base, "https://") {
+		base = "https://" + base
+	}
 	client := http.Client{Timeout: 12 * time.Second}
+	if strings.HasPrefix(base, "https://") {
+		client = http.Client{
+			Timeout:   12 * time.Second,
+			Transport: &http.Transport{TLSClientConfig: mesh.InsecureBlackctlTLSConfig()},
+		}
+	}
 
 	// ---------------- CHAIN HEIGHT ----------------
 	if cmd == "height" {
@@ -296,5 +307,5 @@ func usage() {
 	fmt.Println(" blackctl chain block --height 1    (or: blackctl chain block 1)")
 	fmt.Println("")
 	fmt.Println("env:")
-	fmt.Println("  BLACKCTL_API=http://127.0.0.1:6060   (or 127.0.0.1:6060)")
+	fmt.Println("  BLACKCTL_API=https://127.0.0.1:6060  (or http://127.0.0.1:6060 or 127.0.0.1:6060)")
 }

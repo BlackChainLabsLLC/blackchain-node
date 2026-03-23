@@ -7,7 +7,6 @@ import (
 	"io"
 	"log"
 	"net"
-	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -149,8 +148,8 @@ func (m *meshDaemon) requestPeerHeight(addr string) (int64, string, error) {
 		return 0, "", fmt.Errorf("derived bad http port from %d", meshPort)
 	}
 
-	url := fmt.Sprintf("http://%s:%d/chain/status", host, httpPort)
-	c := &http.Client{Timeout: 2 * time.Second}
+	url := fmt.Sprintf("https://%s:%d/chain/status", host, httpPort)
+	c := newInternalHTTPSClient(2 * time.Second)
 	resp, err := c.Get(url)
 	if err != nil {
 		return 0, "", err
@@ -191,7 +190,7 @@ func (m *meshDaemon) requestPeerRange(addr string, from, to int64) ([]Block, err
 		return nil, fmt.Errorf("bad mesh port %d", p)
 	}
 
-	base := fmt.Sprintf("http://%s:%d", host, apiPort)
+	base := fmt.Sprintf("https://%s:%d", host, apiPort)
 
 	out := make([]Block, 0, (to-from)+1)
 
@@ -215,7 +214,8 @@ func (m *meshDaemon) requestPeerRange(addr string, from, to int64) ([]Block, err
 }
 
 func httpGetBytes(url string) ([]byte, error) {
-	resp, err := http.Get(url)
+	client := newInternalHTTPSClient(2 * time.Second)
+	resp, err := client.Get(url)
 	if err != nil {
 		return nil, err
 	}
