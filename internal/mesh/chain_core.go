@@ -82,6 +82,35 @@ func blockRewardForHeight(h int64) int64 {
 	return reward
 }
 
+
+// ========================================
+// PHASE 5.5 TREASURY SCAFFOLD (INACTIVE)
+// ========================================
+
+const (
+        FeeSplitForkHeight int64 = 1279
+
+        ProducerFeeBPS int64 = 9000
+        TreasuryFeeBPS int64 = 1000
+)
+
+var TreasuryAddr = "TREASURY_BLACKCHAIN"
+
+func feeSplitActive(height int64) bool {
+        return height >= FeeSplitForkHeight
+}
+
+func splitFees(total int64) (int64, int64) {
+        if total <= 0 {
+                return 0, 0
+        }
+        producer := (total * ProducerFeeBPS) / 10000
+        treasury := total - producer
+        return producer, treasury
+}
+
+// ========================================
+
 type Account struct {
 	Balance int64 `json:"balance"`
 	Nonce   int64 `json:"nonce"`
@@ -227,8 +256,10 @@ func (c *ProductionChain) addVoteLocked(v Vote) error {
 	return nil
 }
 
+
 func (c *ProductionChain) applyBlockLocked(b Block) error {
-	c.ensureGenesisLocked()
+	
+c.ensureGenesisLocked()
 
 	if b.Reward < 0 {
 		return fmt.Errorf("negative block reward")
@@ -274,7 +305,13 @@ func (c *ProductionChain) applyBlockLocked(b Block) error {
 		return fmt.Errorf("missing producer")
 	}
 
-	expectedReward := blockRewardForHeight(b.Height) + totalFees
+	expectedReward := func() int64 {
+		if feeSplitActive(b.Height) {
+			producerFees, _ := splitFees(totalFees)
+			return blockRewardForHeight(b.Height) + producerFees
+		}
+		return blockRewardForHeight(b.Height) + totalFees
+	}()
 	if b.Reward != expectedReward {
 		return fmt.Errorf("bad reward: got=%d want=%d", b.Reward, expectedReward)
 	}
@@ -347,6 +384,13 @@ func (c *ProductionChain) applyBlockLocked(b Block) error {
 	}
 	acct := c.getOrCreateAccount(recipient)
 	acct.Balance += b.Reward
+	if feeSplitActive(b.Height) {
+		_, treasuryFees := splitFees(totalFees)
+		if treasuryFees > 0 && TreasuryAddr != "" {
+			treas := c.getOrCreateAccount(TreasuryAddr)
+			treas.Balance += treasuryFees
+		}
+	}
 
 	c.blocks[b.Height] = b
 	_ = c.persistBlockLocked(b)
@@ -354,9 +398,6 @@ func (c *ProductionChain) applyBlockLocked(b Block) error {
 	c.height = b.Height
 	c.tip = b.Hash
 
-	if c.daemon != nil {
-		go c.daemon.gossipBlock(b, 3)
-	}
 
 	c.advanceFinalityLocked()
 	c.tip = b.Hash
@@ -413,9 +454,6 @@ func (c *ProductionChain) applyBlockOrBufferLocked(b Block) (bool, error) {
 		}
 		c.height = b.Height
 		c.tip = b.Hash
-		if c.daemon != nil {
-			go c.daemon.gossipBlock(b, 3)
-		}
 		_ = c.drainPendingLocked()
 		return true, nil
 	}
@@ -441,9 +479,6 @@ func (c *ProductionChain) drainPendingLocked() int {
 		}
 		c.height = b.Height
 		c.tip = b.Hash
-		if c.daemon != nil {
-			go c.daemon.gossipBlock(b, 3)
-		}
 		applied++
 	}
 	return applied
@@ -503,7 +538,15 @@ func (c *ProductionChain) calcStateHashWithBlock(b Block) string {
 	}
 	_ = totalFees
 
-	reward := blockRewardForHeight(b.Height)
+	reward := blockRewardForHeight(b.Height) + totalFees
+	if feeSplitActive(b.Height) {
+		producerFees, treasuryFees := splitFees(totalFees)
+		reward = blockRewardForHeight(b.Height) + producerFees
+		if treasuryFees > 0 && TreasuryAddr != "" {
+			t := get(TreasuryAddr)
+			t.Balance += treasuryFees
+		}
+	}
 	if reward > 0 {
 		recipient := b.Producer
 		if b.ProducerAddr != "" {
@@ -643,12 +686,25 @@ func (c *ProductionChain) proposeBlock() error {
 	txs := c.mempool
 	c.mempool = nil
 
+        totalFees := int64(0)
+        for _, tx := range txs {
+                totalFees += tx.Fee
+        }
+
+
 	b := Block{
 		ProducerAddr: producerAddr,
 		Height:       c.height + 1,
 		PrevHash:     c.tip,
 		Txs:          txs,
-		Reward:       blockRewardForHeight(c.height + 1),
+		Reward: func() int64 {
+                h := c.height + 1
+                if feeSplitActive(h) {
+                        producerFees, _ := splitFees(totalFees)
+                        return blockRewardForHeight(h) + producerFees
+                }
+                return blockRewardForHeight(h) + totalFees
+        }(),
 		Producer:     pubHex,
 		ValidatorID:  pubHex,
 		TimeUTC:      time.Now().UTC(),
@@ -660,4 +716,21 @@ func (c *ProductionChain) proposeBlock() error {
 
 	_, err = c.applyBlockOrBufferLocked(b)
 	return err
+}
+// ===== PHASE 9: FINALITY SNAPSHOT (READ-ONLY, SAFE) =====
+func (c *ProductionChain) GetFinalitySnapshot() (int64, string, int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	finalizedHeight := c.finalizedHeight
+	depth := finalityDepth
+
+	var finalizedTip string
+	if finalizedHeight > 0 {
+		if b, ok := c.blocks[finalizedHeight]; ok {
+			finalizedTip = b.Hash
+		}
+	}
+
+	return finalizedHeight, finalizedTip, depth
 }
