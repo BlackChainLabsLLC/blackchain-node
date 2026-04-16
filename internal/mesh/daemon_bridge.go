@@ -74,6 +74,18 @@ type meshDaemon struct {
 	discoMu    sync.RWMutex
 	discoCfg   discoveryConfig
 	discoPeers map[string]discoveredPeer
+
+	statusMu                  sync.RWMutex
+	startedAt                 time.Time
+	startupReady              bool
+	replayFailureCount        int64
+	lastReplayError           string
+	syncErrorCount            int64
+	lastSyncError             string
+	lastSyncLocalHeight       int64
+	lastSyncBestHeight        int64
+	rejectedPeerMutationCount int64
+	lastRejectedPeerMutation  string
 }
 
 /* ===================== START DAEMON ===================== */
@@ -175,6 +187,7 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 		seen:       make(map[string]time.Time),
 		reputation: make(map[string]*Reputation),
 		uc:         make(map[string]*UCRecord),
+		startedAt:  time.Now().UTC(),
 	}
 
 	m.chain.ensureGenesisLocked()
@@ -183,11 +196,17 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 	m.chain.dataDir = m.dataDir
 	m.chain.persistDir = m.persistDir
 
-	if _, err := m.chain.LoadSnapshotFromDisk(); err != nil {
+	snapshotLoaded, err := m.chain.LoadSnapshotFromDisk()
+	if err != nil {
+		m.recordReplayFailure(err)
+		log.Printf("[startup] snapshot replay failed: %v", err)
 		return nil, err
 	}
+	log.Printf("[startup] snapshot replay loaded=%v", snapshotLoaded)
 
 	if err := m.chain.loadFromDisk(); err != nil {
+		m.recordReplayFailure(err)
+		log.Printf("[startup] block replay failed: %v", err)
 		return nil, err
 	}
 
@@ -201,6 +220,10 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 	}
 
 	m.chain.mu.Unlock()
+	m.markStartupReady()
+	m.chain.mu.RLock()
+	log.Printf("[startup] ready node_id=%s height=%d tip=%s peers=%d data_dir=%s", m.nodeID, m.chain.height, m.chain.tip, len(m.peers), m.dataDir)
+	m.chain.mu.RUnlock()
 
 	m.startLivenessLoop()
 	m.startSignedStateLoop()
@@ -277,6 +300,7 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 
 			if r.Method == http.MethodPost {
 				if !m.allowRuntimePeerMutation {
+					m.recordRejectedPeerMutation("disabled")
 					log.Printf("[peers] rejected runtime mutation from=%s reason=disabled", r.RemoteAddr)
 					writeJSON(w, http.StatusForbidden, map[string]any{
 						"ok":    false,
@@ -290,6 +314,7 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 				}
 
 				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					m.recordRejectedPeerMutation("bad_json")
 					log.Printf("[peers] rejected runtime mutation from=%s reason=bad_json err=%v", r.RemoteAddr, err)
 					writeJSON(w, http.StatusBadRequest, map[string]any{
 						"ok":    false,
@@ -300,6 +325,7 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 
 				addr := strings.TrimSpace(req.Addr)
 				if addr == "" {
+					m.recordRejectedPeerMutation("empty_addr")
 					log.Printf("[peers] rejected runtime mutation from=%s reason=empty_addr", r.RemoteAddr)
 					writeJSON(w, http.StatusBadRequest, map[string]any{
 						"ok":    false,
@@ -309,6 +335,7 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 				}
 				normalized, err := validateTCPAddress("peer", addr)
 				if err != nil {
+					m.recordRejectedPeerMutation("invalid_addr")
 					log.Printf("[peers] rejected runtime mutation from=%s reason=invalid_addr addr=%q err=%v", r.RemoteAddr, addr, err)
 					writeJSON(w, http.StatusBadRequest, map[string]any{
 						"ok":    false,
@@ -317,6 +344,7 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 					return
 				}
 				if normalized == m.id {
+					m.recordRejectedPeerMutation("self")
 					log.Printf("[peers] rejected runtime mutation from=%s reason=self addr=%s", r.RemoteAddr, normalized)
 					writeJSON(w, http.StatusBadRequest, map[string]any{
 						"ok":    false,
@@ -449,6 +477,93 @@ func (m *meshDaemon) Shutdown(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (m *meshDaemon) markStartupReady() {
+	m.statusMu.Lock()
+	m.startupReady = true
+	m.statusMu.Unlock()
+}
+
+func (m *meshDaemon) recordReplayFailure(err error) {
+	if err == nil {
+		return
+	}
+	m.statusMu.Lock()
+	m.replayFailureCount++
+	m.lastReplayError = err.Error()
+	m.statusMu.Unlock()
+}
+
+func (m *meshDaemon) recordSyncHeights(localH, bestH int64) {
+	m.statusMu.Lock()
+	m.lastSyncLocalHeight = localH
+	m.lastSyncBestHeight = bestH
+	m.statusMu.Unlock()
+}
+
+func (m *meshDaemon) recordSyncError(err error) {
+	if err == nil {
+		return
+	}
+	m.statusMu.Lock()
+	m.syncErrorCount++
+	m.lastSyncError = err.Error()
+	m.statusMu.Unlock()
+}
+
+func (m *meshDaemon) recordRejectedPeerMutation(reason string) {
+	m.statusMu.Lock()
+	m.rejectedPeerMutationCount++
+	m.lastRejectedPeerMutation = reason
+	m.statusMu.Unlock()
+}
+
+func (m *meshDaemon) operatorStatusSnapshot() map[string]any {
+	m.statusMu.RLock()
+	startedAt := m.startedAt
+	startupReady := m.startupReady
+	replayFailureCount := m.replayFailureCount
+	lastReplayError := m.lastReplayError
+	syncErrorCount := m.syncErrorCount
+	lastSyncError := m.lastSyncError
+	lastSyncLocalHeight := m.lastSyncLocalHeight
+	lastSyncBestHeight := m.lastSyncBestHeight
+	rejectedPeerMutationCount := m.rejectedPeerMutationCount
+	lastRejectedPeerMutation := m.lastRejectedPeerMutation
+	m.statusMu.RUnlock()
+
+	reachable := 0
+	total := 0
+	m.lock.RLock()
+	total = len(m.peers)
+	for _, p := range m.peers {
+		if p.Reachable {
+			reachable++
+		}
+	}
+	m.lock.RUnlock()
+
+	syncLag := int64(0)
+	if lastSyncBestHeight > lastSyncLocalHeight {
+		syncLag = lastSyncBestHeight - lastSyncLocalHeight
+	}
+
+	return map[string]any{
+		"started_at":                          startedAt.Format(time.RFC3339),
+		"startup_ready":                       startupReady,
+		"replay_failure_count":                replayFailureCount,
+		"last_replay_error":                   lastReplayError,
+		"sync_error_count":                    syncErrorCount,
+		"last_sync_error":                     lastSyncError,
+		"last_sync_local_height":              lastSyncLocalHeight,
+		"last_sync_best_height":               lastSyncBestHeight,
+		"sync_lag":                            syncLag,
+		"reachable_peer_count":                reachable,
+		"configured_peer_count":               total,
+		"rejected_runtime_peer_mutations":     rejectedPeerMutationCount,
+		"last_rejected_runtime_peer_mutation": lastRejectedPeerMutation,
+	}
 }
 
 func preflightBindCheck(addrs ...string) error {

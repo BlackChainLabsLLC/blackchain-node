@@ -62,6 +62,7 @@ func (m *meshDaemon) bootstrapSync(ctx context.Context) {
 		for _, addr := range m.reachablePeers() {
 			h, tip, err := m.requestPeerHeight(addr)
 			if err != nil {
+				m.recordSyncError(err)
 				log.Printf("[sync] height err %s: %v", addr, err)
 				continue
 			}
@@ -82,6 +83,7 @@ func (m *meshDaemon) bootstrapSync(ctx context.Context) {
 		m.chain.mu.RLock()
 		localH := m.chain.height
 		m.chain.mu.RUnlock()
+		m.recordSyncHeights(localH, best.Height)
 
 		if best.Height <= localH {
 			log.Printf("[sync] up-to-date local=%d best=%d", localH, best.Height)
@@ -102,7 +104,8 @@ func (m *meshDaemon) bootstrapSync(ctx context.Context) {
 
 			blocks, err := m.requestPeerRange(best.Addr, cur, end)
 			if err != nil {
-				log.Printf("[sync] range err %v", err)
+				m.recordSyncError(err)
+				log.Printf("[sync] range err peer=%s from=%d to=%d: %v", best.Addr, cur, end, err)
 				time.Sleep(750 * time.Millisecond)
 				continue
 			}

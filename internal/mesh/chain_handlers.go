@@ -53,33 +53,58 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"height": h})
 	})
+
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		status := m.operatorStatusSnapshot()
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":     true,
+			"status": status,
+		})
+	})
+
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		status := m.operatorStatusSnapshot()
+		if ready, _ := status["startup_ready"].(bool); !ready {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"ok":     false,
+				"error":  "startup not ready",
+				"status": status,
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":     true,
+			"status": status,
+		})
+	})
 	// --------------------
 	// STATUS
 	// --------------------
 	mux.HandleFunc("/chain/status", func(w http.ResponseWriter, r *http.Request) {
-	m.chain.mu.RLock()
-	height := m.chain.height
-	tip := m.chain.tip
-	finalizedHeight := m.chain.finalizedHeight
-	finalizedTip := ""
-	if finalizedHeight > 0 {
-		if b, ok := m.chain.blocks[finalizedHeight]; ok {
-			finalizedTip = b.Hash
+		m.chain.mu.RLock()
+		height := m.chain.height
+		tip := m.chain.tip
+		finalizedHeight := m.chain.finalizedHeight
+		finalizedTip := ""
+		if finalizedHeight > 0 {
+			if b, ok := m.chain.blocks[finalizedHeight]; ok {
+				finalizedTip = b.Hash
+			}
 		}
-	}
-	m.chain.mu.RUnlock()
+		m.chain.mu.RUnlock()
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"height":           height,
-		"tip":              tip,
-		"finalized_height": finalizedHeight,
-		"finalized_tip":    finalizedTip,
-		"finality_depth":   finalityDepth,
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"height":           height,
+			"tip":              tip,
+			"finalized_height": finalizedHeight,
+			"finalized_tip":    finalizedTip,
+			"finality_depth":   finalityDepth,
+			"ops":              m.operatorStatusSnapshot(),
+		})
 	})
-})
 
-// ===== PHASE 9: /chain/finality =====
+	// ===== PHASE 9: /chain/finality =====
 	mux.HandleFunc("/chain/finality", func(w http.ResponseWriter, r *http.Request) {
 		h, tip, depth := m.chain.GetFinalitySnapshot()
 
@@ -246,7 +271,7 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 			return
 		}
 		b := m.chain.blocks[m.chain.height]
-			_ = b
+		_ = b
 		m.chain.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 	})
@@ -292,6 +317,10 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
+	})
+
+	mux.HandleFunc("/debug/ops", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, m.operatorStatusSnapshot())
 	})
 
 }
