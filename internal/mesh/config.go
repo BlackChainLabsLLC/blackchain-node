@@ -22,6 +22,8 @@ type MeshConfig struct {
 	HttpRateLimitEnabled     bool              `json:"http_rate_limit_enabled"`
 	HttpRateLimitRPS         int               `json:"http_rate_limit_rps"`
 	HttpRateLimitBurst       int               `json:"http_rate_limit_burst"`
+	DebugEndpointsEnabled    *bool             `json:"debug_endpoints_enabled,omitempty"`
+	AdminEndpointsEnabled    *bool             `json:"admin_endpoints_enabled,omitempty"`
 	AllowRuntimePeerMutation bool              `json:"allow_runtime_peer_mutation"`
 	Peers                    []string          `json:"peers"`
 	PeerAPI                  map[string]string `json:"peer_api,omitempty"`

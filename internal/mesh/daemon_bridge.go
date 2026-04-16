@@ -49,6 +49,8 @@ type meshDaemon struct {
 	bootstrapPeers           []string
 	peerAPI                  map[string]string
 	allowRuntimePeerMutation bool
+	debugEndpointsEnabled    bool
+	adminEndpointsEnabled    bool
 	listener                 net.Listener
 	peers                    map[string]*Peer
 	lock                     sync.RWMutex
@@ -107,6 +109,8 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 	log.Println("[mesh] listen  =", cfg.Listen)
 	log.Println("[mesh] http    =", cfg.HttpListen)
 	log.Println("[mesh] peers   =", cfg.Peers)
+	log.Println("[mesh] debug_http =", resolveHTTPSurfaceEnabled(cfg.DebugEndpointsEnabled, cfg.HttpListen))
+	log.Println("[mesh] admin_http =", resolveHTTPSurfaceEnabled(cfg.AdminEndpointsEnabled, cfg.HttpListen))
 	log.Println("[mesh] =================================")
 
 	ln, err := meshListen(cfg.Listen, cfg.TLS)
@@ -178,6 +182,8 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 		bootstrapPeers:           finalPeers,
 		peerAPI:                  normalizePeerAPIMap(cfg.PeerAPI),
 		allowRuntimePeerMutation: cfg.AllowRuntimePeerMutation,
+		debugEndpointsEnabled:    resolveHTTPSurfaceEnabled(cfg.DebugEndpointsEnabled, cfg.HttpListen),
+		adminEndpointsEnabled:    resolveHTTPSurfaceEnabled(cfg.AdminEndpointsEnabled, cfg.HttpListen),
 
 		listener:   ln,
 		peers:      peers,
@@ -299,6 +305,15 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 		mux.HandleFunc("/peers", func(w http.ResponseWriter, r *http.Request) {
 
 			if r.Method == http.MethodPost {
+				if !m.adminEndpointsEnabled {
+					log.Printf("[peers] rejected runtime mutation from=%s reason=admin_surface_disabled", r.RemoteAddr)
+					m.recordRejectedPeerMutation("admin_surface_disabled")
+					writeJSON(w, http.StatusForbidden, map[string]any{
+						"ok":    false,
+						"error": "admin endpoints disabled on this node",
+					})
+					return
+				}
 				if !m.allowRuntimePeerMutation {
 					m.recordRejectedPeerMutation("disabled")
 					log.Printf("[peers] rejected runtime mutation from=%s reason=disabled", r.RemoteAddr)
@@ -582,6 +597,26 @@ func preflightBindCheck(addrs ...string) error {
 		_ = l.Close()
 	}
 	return nil
+}
+
+func resolveHTTPSurfaceEnabled(override *bool, httpListen string) bool {
+	if override != nil {
+		return *override
+	}
+	return isLoopbackHTTPListen(httpListen)
+}
+
+func isLoopbackHTTPListen(addr string) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil {
+		return false
+	}
+	host = strings.TrimSpace(host)
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func normalizePeerAPIMap(in map[string]string) map[string]string {

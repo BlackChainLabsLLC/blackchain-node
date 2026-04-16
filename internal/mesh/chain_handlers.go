@@ -25,6 +25,28 @@ func getActiveChain() *ProductionChain {
 	return c
 }
 
+func (m *meshDaemon) requireDebugSurface(w http.ResponseWriter) bool {
+	if m.debugEndpointsEnabled {
+		return true
+	}
+	writeJSON(w, http.StatusForbidden, map[string]any{
+		"ok":    false,
+		"error": "debug endpoints disabled on this node",
+	})
+	return false
+}
+
+func (m *meshDaemon) requireAdminSurface(w http.ResponseWriter) bool {
+	if m.adminEndpointsEnabled {
+		return true
+	}
+	writeJSON(w, http.StatusForbidden, map[string]any{
+		"ok":    false,
+		"error": "admin endpoints disabled on this node",
+	})
+	return false
+}
+
 // registerChainHandlers mounts core chain HTTP endpoints.
 func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 	// --------------------
@@ -32,6 +54,9 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 	// GET /debug/wallet
 	// --------------------
 	mux.HandleFunc("/debug/wallet", func(w http.ResponseWriter, r *http.Request) {
+		if !m.requireDebugSurface(w) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		daemonBound := (m.chain != nil && m.chain.daemon != nil)
 		daemonWallet := ""
@@ -230,6 +255,9 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 	// LOCAL PROPOSE
 	// --------------------
 	mux.HandleFunc("/chain/propose", func(w http.ResponseWriter, r *http.Request) {
+		if !m.requireAdminSurface(w) {
+			return
+		}
 		// Leader gating: only the configured leader node may propose.
 		if m.nodeID != "node1" {
 			w.WriteHeader(http.StatusForbidden)
@@ -256,6 +284,9 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 	// PROPOSE + GOSSIP
 	// --------------------
 	mux.HandleFunc("/chain/propose_broadcast", func(w http.ResponseWriter, r *http.Request) {
+		if !m.requireAdminSurface(w) {
+			return
+		}
 		// Leader gating: only the configured leader node may propose+broadcast.
 		if m.nodeID != "node1" {
 			w.WriteHeader(http.StatusForbidden)
@@ -278,6 +309,9 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 
 	// DEBUG: identity inspection
 	mux.HandleFunc("/debug/nodeid", func(w http.ResponseWriter, r *http.Request) {
+		if !m.requireDebugSurface(w) {
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"node_id": m.nodeID,
 			"id":      m.id,
@@ -289,6 +323,9 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 	// GET /debug/finality
 	// GET /debug/finality?h=12   (includes block finalized flag for that height if present)
 	mux.HandleFunc("/debug/finality", func(w http.ResponseWriter, r *http.Request) {
+		if !m.requireDebugSurface(w) {
+			return
+		}
 		m.chain.mu.RLock()
 		defer m.chain.mu.RUnlock()
 
@@ -320,6 +357,9 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 	})
 
 	mux.HandleFunc("/debug/ops", func(w http.ResponseWriter, r *http.Request) {
+		if !m.requireDebugSurface(w) {
+			return
+		}
 		writeJSON(w, http.StatusOK, m.operatorStatusSnapshot())
 	})
 
