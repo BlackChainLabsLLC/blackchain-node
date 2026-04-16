@@ -1,6 +1,10 @@
 
 # runtime data
 data/
+!website/data/
+!website/data/.gitkeep
+!website/data/README.md
+!website/data/territory_leads.template.ndjson
 
 # tls certificates and keys
 tls/

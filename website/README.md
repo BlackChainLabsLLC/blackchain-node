@@ -30,3 +30,6 @@
 - [WEBSITE_LEAD_STATUS_TRACKER_TEMPLATE.md](/mnt/blacknet/projects/blackchain/website/docs/WEBSITE_LEAD_STATUS_TRACKER_TEMPLATE.md)
 - [WEBSITE_PUBLISH_TO_LAUNCH_HANDOFF.md](/mnt/blacknet/projects/blackchain/website/docs/WEBSITE_PUBLISH_TO_LAUNCH_HANDOFF.md)
 - [WEBSITE_STATIC_LEAD_PRIVACY_NOTE.md](/mnt/blacknet/projects/blackchain/website/docs/WEBSITE_STATIC_LEAD_PRIVACY_NOTE.md)
+- [WEBSITE_LEAD_FIRST_RESPONSE_TEMPLATES.md](/mnt/blacknet/projects/blackchain/website/docs/WEBSITE_LEAD_FIRST_RESPONSE_TEMPLATES.md)
+- [WEBSITE_LEAD_QUALIFICATION_CHECKLIST.md](/mnt/blacknet/projects/blackchain/website/docs/WEBSITE_LEAD_QUALIFICATION_CHECKLIST.md)
+- [WEBSITE_TO_TERRITORY_PIPELINE_HANDOFF.md](/mnt/blacknet/projects/blackchain/website/docs/WEBSITE_TO_TERRITORY_PIPELINE_HANDOFF.md)
