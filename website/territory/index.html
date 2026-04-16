@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Bring BlackChain to Your Town</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script defer src="/app.js"></script>
+  </head>
+  <body data-page="territory">
+    <header class="site-header">
+      <a class="brand" href="/">BlackChain</a>
+      <nav class="site-nav" aria-label="Primary">
+        <a href="/">Home</a>
+        <a href="/pricing">Pricing</a>
+        <a href="/host-site">Host Site</a>
+        <a href="/operator">Operator</a>
+        <a aria-current="page" href="/territory">Territory</a>
+      </nav>
+    </header>
+    <main class="section-stack">
+      <section class="panel hero">
+        <p class="eyebrow">Territory Interest</p>
+        <h1>Bring BlackChain to Your Town</h1>
+      </section>
+      <section class="panel">
+        <h2>Intro</h2>
+        <p>Tell us about your town, territory, or host-site opportunity and we will follow up on launch fit, operator path, and activation readiness.</p>
+      </section>
+      <section class="panel">
+        <form data-territory-form novalidate>
+          <div class="form-grid">
+            <label>
+              Name
+              <input name="name" type="text" required />
+            </label>
+            <label>
+              Organization
+              <input name="organization" type="text" required />
+            </label>
+            <label>
+              Email
+              <input name="email" type="email" required />
+            </label>
+            <label>
+              Phone
+              <input name="phone" type="text" />
+            </label>
+            <label>
+              Territory or Town
+              <input name="territory_or_town" type="text" required />
+            </label>
+            <label>
+              Preferred Plan Tier
+              <select name="preferred_plan_tier">
+                <option value="">Select a plan tier</option>
+                <option value="Standard">Standard</option>
+                <option value="Premium">Premium</option>
+                <option value="Family/Business">Family/Business</option>
+              </select>
+            </label>
+          </div>
+          <div class="form-grid form-actions">
+            <fieldset class="panel">
+              <legend>Host-Site Interest</legend>
+              <div class="radio-group">
+                <label class="radio"><input name="host_site_interest" type="radio" value="yes" required /> YES</label>
+                <label class="radio"><input name="host_site_interest" type="radio" value="no" required /> NO</label>
+              </div>
+            </fieldset>
+            <fieldset class="panel">
+              <legend>Operator Interest</legend>
+              <div class="radio-group">
+                <label class="radio"><input name="operator_interest" type="radio" value="yes" required /> YES</label>
+                <label class="radio"><input name="operator_interest" type="radio" value="no" required /> NO</label>
+              </div>
+            </fieldset>
+          </div>
+          <label class="form-note">
+            Notes
+            <textarea name="notes"></textarea>
+          </label>
+          <div class="form-actions">
+            <button type="submit">Submit Territory Interest</button>
+          </div>
+          <p class="message success" data-form-success></p>
+          <p class="message error" data-form-error></p>
+        </form>
+      </section>
+    </main>
+    <footer class="site-footer">
+      <p>The territory form stays within the documented field schema and current CTA flow.</p>
+    </footer>
+  </body>
+</html>
