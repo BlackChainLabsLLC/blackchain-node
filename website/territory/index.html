@@ -11,11 +11,13 @@
     <header class="site-header">
       <a class="brand" href="/">BlackChain</a>
       <nav class="site-nav" aria-label="Primary">
-        <a href="/">Home</a>
-        <a href="/pricing">Pricing</a>
-        <a href="/host-site">Host Site</a>
-        <a href="/operator">Operator</a>
-        <a aria-current="page" href="/territory">Territory</a>
+        <div class="site-nav-group">
+          <a href="/">Home</a>
+          <a href="/pricing">Pricing</a>
+          <a href="/host-site">Host Site</a>
+          <a href="/operator">Operator</a>
+          <a aria-current="page" href="/territory">Territory</a>
+        </div>
       </nav>
     </header>
     <main class="section-stack">
@@ -28,6 +30,9 @@
         <p>Tell us about your town, territory, or host-site opportunity and we will follow up on launch fit, operator path, and activation readiness.</p>
       </section>
       <section class="panel">
+        <div class="section-header">
+          <h2>Form</h2>
+        </div>
         <form data-territory-form novalidate>
           <div class="form-grid">
             <label>
@@ -89,7 +94,16 @@
       </section>
     </main>
     <footer class="site-footer">
-      <p>The territory form stays within the documented field schema and current CTA flow.</p>
+      <section class="panel">
+        <p>The territory form stays within the documented field schema and current CTA flow.</p>
+        <div class="footer-links">
+          <a href="/">Home</a>
+          <a href="/pricing">Pricing</a>
+          <a href="/host-site">Host Site</a>
+          <a href="/operator">Operator</a>
+          <a href="/territory">Territory</a>
+        </div>
+      </section>
     </footer>
   </body>
 </html>

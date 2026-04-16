@@ -24,6 +24,14 @@
   });
 
   const form = document.querySelector("[data-territory-form]");
+  if (document.body.dataset.page === "territory" && !form && window.location.hash === "#submitted") {
+    const success = document.querySelector("[data-form-success]");
+    if (success) {
+      success.textContent = "Territory interest submitted. The BlackChain team can follow up on launch fit, operator path, and activation readiness.";
+      success.classList.add("is-visible");
+    }
+  }
+
   if (!form) {
     return;
   }
@@ -68,10 +76,14 @@
 
     const payload = Object.fromEntries(new FormData(form).entries());
     window.blackchainLastTerritorySubmission = payload;
+    try {
+      window.localStorage.setItem("blackchainLastTerritorySubmission", JSON.stringify(payload));
+    } catch (err) {
+      track("territory_form_submit_error", { reason: "storage_unavailable" });
+    }
 
     form.reset();
     started = false;
-    setMessage(success, "Territory interest submitted. The BlackChain team can follow up on launch fit, operator path, and activation readiness.");
-    window.location.hash = "submitted";
+    window.location.href = "/territory/thanks/";
   });
 })();

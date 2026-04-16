@@ -11,11 +11,13 @@
     <header class="site-header">
       <a class="brand" href="/">BlackChain</a>
       <nav class="site-nav" aria-label="Primary">
-        <a aria-current="page" href="/">Home</a>
-        <a href="/pricing">Pricing</a>
-        <a href="/host-site">Host Site</a>
-        <a href="/operator">Operator</a>
-        <a href="/territory">Territory</a>
+        <div class="site-nav-group">
+          <a aria-current="page" href="/">Home</a>
+          <a href="/pricing">Pricing</a>
+          <a href="/host-site">Host Site</a>
+          <a href="/operator">Operator</a>
+          <a href="/territory">Territory</a>
+        </div>
       </nav>
     </header>
     <main class="section-stack">
@@ -29,7 +31,9 @@
       </section>
       <section class="grid grid-2">
         <article class="panel">
-          <h2>How It Works</h2>
+          <div class="section-header">
+            <h2>How It Works</h2>
+          </div>
           <ul class="list">
             <li>prepare a host site</li>
             <li>assign an operator</li>
@@ -38,7 +42,9 @@
           </ul>
         </article>
         <article class="panel">
-          <h2>Who It Is For</h2>
+          <div class="section-header">
+            <h2>Who It Is For</h2>
+          </div>
           <ul class="list">
             <li>towns and territories exploring rollout</li>
             <li>host sites ready to support deployment</li>
@@ -57,7 +63,16 @@
       </section>
     </main>
     <footer class="site-footer">
-      <p>BlackChain public rollout pages for the current node go-to-market path.</p>
+      <section class="panel">
+        <p>BlackChain public rollout pages for the current node go-to-market path.</p>
+        <div class="footer-links">
+          <a href="/">Home</a>
+          <a href="/pricing">Pricing</a>
+          <a href="/host-site">Host Site</a>
+          <a href="/operator">Operator</a>
+          <a href="/territory">Territory</a>
+        </div>
+      </section>
     </footer>
   </body>
 </html>
