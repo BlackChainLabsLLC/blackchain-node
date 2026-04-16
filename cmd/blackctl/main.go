@@ -18,16 +18,12 @@ import (
 func main() {
 	// Allow env override (supports values like "127.0.0.1:6060", "http://127.0.0.1:6060", or "https://127.0.0.1:6060")
 	envAPI := strings.TrimSpace(os.Getenv("BLACKCTL_API"))
-	defaultAddr := "127.0.0.1:6060"
+	defaultAddr := "http://127.0.0.1:6060"
 	if envAPI != "" {
-		envAddr := strings.TrimPrefix(envAPI, "http://")
-		envAddr = strings.TrimPrefix(envAddr, "https://")
-		if envAddr != "" {
-			defaultAddr = envAddr
-		}
+		defaultAddr = envAPI
 	}
 
-	addr := flag.String("addr", defaultAddr, "rpc address (host:port), or set BLACKCTL_API")
+	addr := flag.String("addr", defaultAddr, "rpc address (host:port, http://host:port, or https://host:port), or set BLACKCTL_API")
 	height := flag.Int64("height", 0, "block height (for chain block)")
 
 	walletNew := flag.String("wallet-new", "", "create wallet")
@@ -98,10 +94,7 @@ func main() {
 
 	cmd := args[1]
 
-	base := *addr
-	if !strings.HasPrefix(base, "http://") && !strings.HasPrefix(base, "https://") {
-		base = "https://" + base
-	}
+	base := normalizeAPIBase(*addr)
 	client := http.Client{Timeout: 12 * time.Second}
 	if strings.HasPrefix(base, "https://") {
 		client = http.Client{
@@ -308,4 +301,12 @@ func usage() {
 	fmt.Println("")
 	fmt.Println("env:")
 	fmt.Println("  BLACKCTL_API=https://127.0.0.1:6060  (or http://127.0.0.1:6060 or 127.0.0.1:6060)")
+}
+
+func normalizeAPIBase(addr string) string {
+	base := strings.TrimSpace(addr)
+	if strings.HasPrefix(base, "http://") || strings.HasPrefix(base, "https://") {
+		return base
+	}
+	return "http://" + base
 }

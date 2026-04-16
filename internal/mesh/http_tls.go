@@ -176,6 +176,8 @@ func InsecureBlackctlTLSConfig() *tls.Config {
 	}
 	for _, path := range []string{
 		strings.TrimSpace(os.Getenv("BLACKCTL_CA_FILE")),
+		filepath.Join("tls", "ca.pem"),
+		"/etc/blackchain/tls/ca.pem",
 		filepath.Join("data", "http_ca.pem"),
 	} {
 		if path == "" {
