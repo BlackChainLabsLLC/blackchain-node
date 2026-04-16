@@ -1,0 +1,17 @@
+{
+  "node_id": "bootstrap",
+  "listen": "127.0.0.1:7071",
+  "http_listen": "127.0.0.1:6069",
+  "peers": [],
+  "data_dir": "/var/lib/blackchain/bootstrap",
+  "tls": {
+    "enabled": true,
+    "cert_file": "/etc/blackchain/tls/bootstrap/cert.pem",
+    "key_file": "/etc/blackchain/tls/bootstrap/key.pem",
+    "ca_file": "/etc/blackchain/tls/ca.pem"
+  },
+  "http_rate_limit_enabled": true,
+  "http_rate_limit_rps": 100000,
+  "http_rate_limit_burst": 200000
+}
+
