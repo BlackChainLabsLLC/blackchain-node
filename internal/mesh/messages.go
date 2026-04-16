@@ -9,7 +9,6 @@ import (
 	"io"
 	"log"
 	"net"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -156,19 +155,10 @@ func (m *meshDaemon) maybeSyncFromSignedState(via string, body string) bool {
 		return true // recognized signed-state, but we're not behind
 	}
 
-	host, portStr, err := net.SplitHostPort(strings.TrimSpace(via))
-	if err != nil {
-		return true // recognized, but cannot derive peer API
-	}
-	p, err := strconv.Atoi(portStr)
+	base, err := m.peerAPIBase(via)
 	if err != nil {
 		return true
 	}
-	apiPort := p - 1012
-	if apiPort <= 0 {
-		return true
-	}
-	base := fmt.Sprintf("https://%s:%d", host, apiPort)
 
 	// Pull and apply blocks (Lego-simple: sequential)
 	client, err := newInternalHTTPSClient(2*time.Second, m.dataDir, m.tlsCfg)

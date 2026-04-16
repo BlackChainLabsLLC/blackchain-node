@@ -10,19 +10,20 @@ import (
 )
 
 type MeshConfig struct {
-	TLS                  *MeshTLS `json:"tls,omitempty"`
-	NodeID               string   `json:"node_id"`
-	PersistDir           string   `json:"persist_dir"`
-	DataDir              string   `json:"data_dir"`
-	Listen               string   `json:"listen"` // mesh TCP
-	Host                 string   `json:"host"`
-	Port                 int      `json:"port"`
-	Debug                string   `json:"debug"`       // legacy debug (deprecated)
-	HttpListen           string   `json:"http_listen"` // HTTP API (REAL)
-	HttpRateLimitEnabled bool     `json:"http_rate_limit_enabled"`
-	HttpRateLimitRPS     int      `json:"http_rate_limit_rps"`
-	HttpRateLimitBurst   int      `json:"http_rate_limit_burst"`
-	Peers                []string `json:"peers"`
+	TLS                  *MeshTLS          `json:"tls,omitempty"`
+	NodeID               string            `json:"node_id"`
+	PersistDir           string            `json:"persist_dir"`
+	DataDir              string            `json:"data_dir"`
+	Listen               string            `json:"listen"` // mesh TCP
+	Host                 string            `json:"host"`
+	Port                 int               `json:"port"`
+	Debug                string            `json:"debug"`       // legacy debug (deprecated)
+	HttpListen           string            `json:"http_listen"` // HTTP API (REAL)
+	HttpRateLimitEnabled bool              `json:"http_rate_limit_enabled"`
+	HttpRateLimitRPS     int               `json:"http_rate_limit_rps"`
+	HttpRateLimitBurst   int               `json:"http_rate_limit_burst"`
+	Peers                []string          `json:"peers"`
+	PeerAPI              map[string]string `json:"peer_api,omitempty"`
 
 	// Discovery (UDP leader/client)
 	DiscoveryEnabled         bool   `json:"discovery_enabled"`
@@ -168,6 +169,18 @@ func validateMeshConfig(cfg *MeshConfig) error {
 			return fmt.Errorf("config validation: peer list must not contain self address: %s", p)
 		}
 		seen[normalized] = struct{}{}
+	}
+	for meshAddr, apiAddr := range cfg.PeerAPI {
+		meshNormalized, err := validateTCPAddress("peer_api mesh address", strings.TrimSpace(meshAddr))
+		if err != nil {
+			return err
+		}
+		if _, err := validateTCPAddress("peer_api api address", strings.TrimSpace(apiAddr)); err != nil {
+			return err
+		}
+		if _, ok := selfAddrs[meshNormalized]; ok {
+			return fmt.Errorf("config validation: peer_api must not contain self mesh address: %s", meshAddr)
+		}
 	}
 
 	return nil

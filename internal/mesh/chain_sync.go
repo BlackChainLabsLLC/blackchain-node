@@ -128,27 +128,11 @@ func (m *meshDaemon) bootstrapSync(ctx context.Context) {
 }
 
 func (m *meshDaemon) requestPeerHeight(addr string) (int64, string, error) {
-	// Derive peer HTTP port from peer mesh listen port.
-	// Canonical local dev pairing:
-	//   mesh 7072 -> http 6060
-	//   mesh 7073 -> http 6061
-	// i.e. httpPort = meshPort - 1012
-	i := strings.LastIndex(addr, ":")
-	if i < 0 {
-		return 0, "", fmt.Errorf("bad peer addr (no port): %q", addr)
-	}
-	host := addr[:i]
-	pstr := addr[i+1:]
-	meshPort, err := strconv.Atoi(pstr)
+	base, err := m.peerAPIBase(addr)
 	if err != nil {
-		return 0, "", fmt.Errorf("bad peer port %q: %w", pstr, err)
+		return 0, "", err
 	}
-	httpPort := meshPort - 1012
-	if httpPort <= 0 {
-		return 0, "", fmt.Errorf("derived bad http port from %d", meshPort)
-	}
-
-	url := fmt.Sprintf("https://%s:%d/chain/status", host, httpPort)
+	url := base + "/chain/status"
 	c, err := newInternalHTTPSClient(2*time.Second, m.dataDir, m.tlsCfg)
 	if err != nil {
 		return 0, "", err
@@ -177,23 +161,10 @@ func (m *meshDaemon) requestPeerHeight(addr string) (int64, string, error) {
 }
 
 func (m *meshDaemon) requestPeerRange(addr string, from, to int64) ([]Block, error) {
-
-	host, portStr, err := net.SplitHostPort(strings.TrimSpace(addr))
+	base, err := m.peerAPIBase(addr)
 	if err != nil {
 		return nil, err
 	}
-
-	p, err := strconv.Atoi(portStr)
-	if err != nil {
-		return nil, err
-	}
-
-	apiPort := p - 1012
-	if apiPort <= 0 {
-		return nil, fmt.Errorf("bad mesh port %d", p)
-	}
-
-	base := fmt.Sprintf("https://%s:%d", host, apiPort)
 
 	out := make([]Block, 0, (to-from)+1)
 
@@ -214,6 +185,30 @@ func (m *meshDaemon) requestPeerRange(addr string, from, to int64) ([]Block, err
 	}
 
 	return out, nil
+}
+
+func (m *meshDaemon) peerAPIBase(addr string) (string, error) {
+	normalized, err := validateTCPAddress("peer", strings.TrimSpace(addr))
+	if err != nil {
+		return "", err
+	}
+	if apiAddr, ok := m.peerAPI[normalized]; ok && strings.TrimSpace(apiAddr) != "" {
+		return "https://" + strings.TrimSpace(apiAddr), nil
+	}
+
+	host, portStr, err := net.SplitHostPort(normalized)
+	if err != nil {
+		return "", err
+	}
+	p, err := strconv.Atoi(portStr)
+	if err != nil {
+		return "", err
+	}
+	apiPort := p - 1012
+	if apiPort <= 0 {
+		return "", fmt.Errorf("peer api resolution failed for %s: no explicit peer_api mapping and derived bad http port from %d", addr, p)
+	}
+	return fmt.Sprintf("https://%s:%d", host, apiPort), nil
 }
 
 func (m *meshDaemon) httpGetBytes(url string) ([]byte, error) {

@@ -47,6 +47,7 @@ type meshDaemon struct {
 	tlsCfg         *MeshTLS
 	walletAddr     string
 	bootstrapPeers []string
+	peerAPI        map[string]string
 	listener       net.Listener
 	peers          map[string]*Peer
 	lock           sync.RWMutex
@@ -162,6 +163,7 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 		walletAddr:     w.Address,
 		persistDir:     cfg.PersistDir,
 		bootstrapPeers: finalPeers,
+		peerAPI:        normalizePeerAPIMap(cfg.PeerAPI),
 
 		listener:   ln,
 		peers:      peers,
@@ -412,6 +414,25 @@ func preflightBindCheck(addrs ...string) error {
 		_ = l.Close()
 	}
 	return nil
+}
+
+func normalizePeerAPIMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for meshAddr, apiAddr := range in {
+		meshNormalized, err := validateTCPAddress("peer_api mesh address", strings.TrimSpace(meshAddr))
+		if err != nil {
+			continue
+		}
+		apiNormalized, err := validateTCPAddress("peer_api api address", strings.TrimSpace(apiAddr))
+		if err != nil {
+			continue
+		}
+		out[meshNormalized] = apiNormalized
+	}
+	return out
 }
 
 // startPeerDialLoop periodically attempts connections to all known peers.
