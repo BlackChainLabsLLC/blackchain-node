@@ -171,7 +171,11 @@ func (m *meshDaemon) maybeSyncFromSignedState(via string, body string) bool {
 	base := fmt.Sprintf("https://%s:%d", host, apiPort)
 
 	// Pull and apply blocks (Lego-simple: sequential)
-	client := newInternalHTTPSClient(2 * time.Second)
+	client, err := newInternalHTTPSClient(2*time.Second, m.dataDir, m.tlsCfg)
+	if err != nil {
+		log.Printf("[sync] tls client error from=%s: %v", via, err)
+		return true
+	}
 	for h := localH + 1; h <= int(ssa.Height); h++ {
 		url := fmt.Sprintf("%s/chain/block?h=%d", base, h)
 		resp, err := client.Get(url)

@@ -149,7 +149,10 @@ func (m *meshDaemon) requestPeerHeight(addr string) (int64, string, error) {
 	}
 
 	url := fmt.Sprintf("https://%s:%d/chain/status", host, httpPort)
-	c := newInternalHTTPSClient(2 * time.Second)
+	c, err := newInternalHTTPSClient(2*time.Second, m.dataDir, m.tlsCfg)
+	if err != nil {
+		return 0, "", err
+	}
 	resp, err := c.Get(url)
 	if err != nil {
 		return 0, "", err
@@ -197,7 +200,7 @@ func (m *meshDaemon) requestPeerRange(addr string, from, to int64) ([]Block, err
 	for h := from; h <= to; h++ {
 		url := fmt.Sprintf("%s/chain/block?h=%d", base, h)
 
-		bs, err := httpGetBytes(url)
+		bs, err := m.httpGetBytes(url)
 		if err != nil {
 			return out, err
 		}
@@ -213,8 +216,11 @@ func (m *meshDaemon) requestPeerRange(addr string, from, to int64) ([]Block, err
 	return out, nil
 }
 
-func httpGetBytes(url string) ([]byte, error) {
-	client := newInternalHTTPSClient(2 * time.Second)
+func (m *meshDaemon) httpGetBytes(url string) ([]byte, error) {
+	client, err := newInternalHTTPSClient(2*time.Second, m.dataDir, m.tlsCfg)
+	if err != nil {
+		return nil, err
+	}
 	resp, err := client.Get(url)
 	if err != nil {
 		return nil, err

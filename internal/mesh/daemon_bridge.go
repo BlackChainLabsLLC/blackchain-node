@@ -252,7 +252,7 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 			httpHost = strings.TrimSpace(cfg.Host)
 		}
 
-		httpCertPath, httpKeyPath, err := ensureHTTPServerTLSFiles(dataDir, httpHost)
+		httpCertPath, httpKeyPath, err := ensureHTTPServerTLSFiles(dataDir, httpHost, cfg.TLS)
 		if err != nil {
 			return nil, fmt.Errorf("http tls files: %w", err)
 		}
