@@ -1,16 +1,16 @@
 package mesh
 
 import (
-	"regexp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 )
+
 type ChainSnapshot struct {
 	Height       int64              `json:"height"`
 	Hash         string             `json:"hash"`
@@ -60,10 +60,7 @@ func (c *ProductionChain) SaveSnapshotLocked() error {
 		return err
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return writeFileAtomicDurable(path, tmp, raw, 0o644)
 }
 
 // LoadSnapshotFromDisk attempts to load snapshot.json and apply it as chain base.
@@ -81,7 +78,7 @@ func (c *ProductionChain) LoadSnapshotFromDisk() (bool, error) {
 
 	var snap ChainSnapshot
 	if err := json.Unmarshal(raw, &snap); err != nil {
-		return false, err
+		return false, handleReplayCorruption("snapshot replay", path, fmt.Errorf("decode snapshot: %w", err), false)
 	}
 
 	// Reset chain state to snapshot
@@ -148,10 +145,13 @@ func (c *ProductionChain) LoadSnapshotFromDisk() (bool, error) {
 		var b Block
 		if err := json.Unmarshal(raw, &b); err != nil {
 			if f.h == maxH {
-				log.Printf("[snapshot] skipping malformed tail block height=%d path=%s err=%v", f.h, f.p, err)
-				continue
+				if recoveryErr := handleReplayCorruption("post-snapshot block replay", f.p, fmt.Errorf("decode height %d: %w", f.h, err), true); recoveryErr == nil {
+					continue
+				} else {
+					return false, recoveryErr
+				}
 			}
-			return false, fmt.Errorf("replay post-snapshot decode height %d path %s: %w", f.h, f.p, err)
+			return false, handleReplayCorruption("post-snapshot block replay", f.p, fmt.Errorf("decode height %d: %w", f.h, err), false)
 		}
 		// Use full validation
 		if err := c.applyBlockLocked(b); err != nil {
