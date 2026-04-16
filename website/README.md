@@ -11,5 +11,16 @@
 - keep CTA targets and form field names aligned to the production docs before publishing
 - local preview:
   - `python3 -m http.server 8123 --directory website`
+- local publish staging:
+  - `./website/publish_static_site.sh /tmp/blackchain-website-publish`
 - publish by copying the contents of `website/` to any static host that preserves directory routes
 - do not add backend form handling in this sweep
+
+## Deployment And Workflow Pack
+
+- [WEBSITE_PUBLISH_NOTES.md](/mnt/blacknet/projects/blackchain/website/docs/WEBSITE_PUBLISH_NOTES.md)
+- [TERRITORY_FORM_CAPTURE_WORKFLOW.md](/mnt/blacknet/projects/blackchain/website/docs/TERRITORY_FORM_CAPTURE_WORKFLOW.md)
+- [LEAD_INTAKE_STORAGE_AND_EXPORT.md](/mnt/blacknet/projects/blackchain/website/docs/LEAD_INTAKE_STORAGE_AND_EXPORT.md)
+- [WEBSITE_RELEASE_CHECKLIST.md](/mnt/blacknet/projects/blackchain/website/docs/WEBSITE_RELEASE_CHECKLIST.md)
+- [WEBSITE_PUBLISH_ROLLBACK.md](/mnt/blacknet/projects/blackchain/website/docs/WEBSITE_PUBLISH_ROLLBACK.md)
+- [STATIC_HOSTING_RECOMMENDATION.md](/mnt/blacknet/projects/blackchain/website/docs/STATIC_HOSTING_RECOMMENDATION.md)
