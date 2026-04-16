@@ -10,20 +10,21 @@ import (
 )
 
 type MeshConfig struct {
-	TLS                  *MeshTLS          `json:"tls,omitempty"`
-	NodeID               string            `json:"node_id"`
-	PersistDir           string            `json:"persist_dir"`
-	DataDir              string            `json:"data_dir"`
-	Listen               string            `json:"listen"` // mesh TCP
-	Host                 string            `json:"host"`
-	Port                 int               `json:"port"`
-	Debug                string            `json:"debug"`       // legacy debug (deprecated)
-	HttpListen           string            `json:"http_listen"` // HTTP API (REAL)
-	HttpRateLimitEnabled bool              `json:"http_rate_limit_enabled"`
-	HttpRateLimitRPS     int               `json:"http_rate_limit_rps"`
-	HttpRateLimitBurst   int               `json:"http_rate_limit_burst"`
-	Peers                []string          `json:"peers"`
-	PeerAPI              map[string]string `json:"peer_api,omitempty"`
+	TLS                      *MeshTLS          `json:"tls,omitempty"`
+	NodeID                   string            `json:"node_id"`
+	PersistDir               string            `json:"persist_dir"`
+	DataDir                  string            `json:"data_dir"`
+	Listen                   string            `json:"listen"` // mesh TCP
+	Host                     string            `json:"host"`
+	Port                     int               `json:"port"`
+	Debug                    string            `json:"debug"`       // legacy debug (deprecated)
+	HttpListen               string            `json:"http_listen"` // HTTP API (REAL)
+	HttpRateLimitEnabled     bool              `json:"http_rate_limit_enabled"`
+	HttpRateLimitRPS         int               `json:"http_rate_limit_rps"`
+	HttpRateLimitBurst       int               `json:"http_rate_limit_burst"`
+	AllowRuntimePeerMutation bool              `json:"allow_runtime_peer_mutation"`
+	Peers                    []string          `json:"peers"`
+	PeerAPI                  map[string]string `json:"peer_api,omitempty"`
 
 	// Discovery (UDP leader/client)
 	DiscoveryEnabled         bool   `json:"discovery_enabled"`

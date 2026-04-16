@@ -44,14 +44,15 @@ type RouteEntry struct {
 }
 
 type meshDaemon struct {
-	tlsCfg         *MeshTLS
-	walletAddr     string
-	bootstrapPeers []string
-	peerAPI        map[string]string
-	listener       net.Listener
-	peers          map[string]*Peer
-	lock           sync.RWMutex
-	httpSrv        *http.Server
+	tlsCfg                   *MeshTLS
+	walletAddr               string
+	bootstrapPeers           []string
+	peerAPI                  map[string]string
+	allowRuntimePeerMutation bool
+	listener                 net.Listener
+	peers                    map[string]*Peer
+	lock                     sync.RWMutex
+	httpSrv                  *http.Server
 
 	id     string
 	nodeID string
@@ -157,13 +158,14 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 	/* ===================== DAEMON INIT ===================== */
 
 	m := &meshDaemon{
-		tlsCfg:         cfg.TLS,
-		chain:          newProductionChain(),
-		dataDir:        dataDir,
-		walletAddr:     w.Address,
-		persistDir:     cfg.PersistDir,
-		bootstrapPeers: finalPeers,
-		peerAPI:        normalizePeerAPIMap(cfg.PeerAPI),
+		tlsCfg:                   cfg.TLS,
+		chain:                    newProductionChain(),
+		dataDir:                  dataDir,
+		walletAddr:               w.Address,
+		persistDir:               cfg.PersistDir,
+		bootstrapPeers:           finalPeers,
+		peerAPI:                  normalizePeerAPIMap(cfg.PeerAPI),
+		allowRuntimePeerMutation: cfg.AllowRuntimePeerMutation,
 
 		listener:   ln,
 		peers:      peers,
@@ -274,39 +276,90 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 		mux.HandleFunc("/peers", func(w http.ResponseWriter, r *http.Request) {
 
 			if r.Method == http.MethodPost {
+				if !m.allowRuntimePeerMutation {
+					log.Printf("[peers] rejected runtime mutation from=%s reason=disabled", r.RemoteAddr)
+					writeJSON(w, http.StatusForbidden, map[string]any{
+						"ok":    false,
+						"error": "runtime peer mutation disabled; set allow_runtime_peer_mutation=true for explicit opt-in",
+					})
+					return
+				}
 
 				var req struct {
 					Addr string `json:"addr"`
 				}
 
-				_ = json.NewDecoder(r.Body).Decode(&req)
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					log.Printf("[peers] rejected runtime mutation from=%s reason=bad_json err=%v", r.RemoteAddr, err)
+					writeJSON(w, http.StatusBadRequest, map[string]any{
+						"ok":    false,
+						"error": "invalid request body",
+					})
+					return
+				}
 
 				addr := strings.TrimSpace(req.Addr)
-
-				if addr != "" {
-
-					m.lock.Lock()
-
-					if _, ok := m.peers[addr]; !ok {
-						m.TouchReachable(addr, true)
-
-						exists := false
-						for _, bp := range m.bootstrapPeers {
-							if bp == addr {
-								exists = true
-								break
-							}
-						}
-
-						if !exists {
-							m.bootstrapPeers = append(m.bootstrapPeers, addr)
-						}
-					}
-
-					m.lock.Unlock()
-
-					go m.ConnectToPeers([]string{addr})
+				if addr == "" {
+					log.Printf("[peers] rejected runtime mutation from=%s reason=empty_addr", r.RemoteAddr)
+					writeJSON(w, http.StatusBadRequest, map[string]any{
+						"ok":    false,
+						"error": "missing addr",
+					})
+					return
 				}
+				normalized, err := validateTCPAddress("peer", addr)
+				if err != nil {
+					log.Printf("[peers] rejected runtime mutation from=%s reason=invalid_addr addr=%q err=%v", r.RemoteAddr, addr, err)
+					writeJSON(w, http.StatusBadRequest, map[string]any{
+						"ok":    false,
+						"error": err.Error(),
+					})
+					return
+				}
+				if normalized == m.id {
+					log.Printf("[peers] rejected runtime mutation from=%s reason=self addr=%s", r.RemoteAddr, normalized)
+					writeJSON(w, http.StatusBadRequest, map[string]any{
+						"ok":    false,
+						"error": "peer mutation rejected: self address not allowed",
+					})
+					return
+				}
+
+				m.lock.Lock()
+				_, existsPeer := m.peers[normalized]
+				existsBootstrap := false
+				for _, bp := range m.bootstrapPeers {
+					if bp == normalized {
+						existsBootstrap = true
+						break
+					}
+				}
+				if !existsPeer {
+					m.TouchReachable(normalized, true)
+				}
+				if !existsBootstrap {
+					m.bootstrapPeers = append(m.bootstrapPeers, normalized)
+				}
+				m.lock.Unlock()
+
+				if existsPeer && existsBootstrap {
+					log.Printf("[peers] runtime mutation no-op from=%s addr=%s reason=already_present", r.RemoteAddr, normalized)
+					writeJSON(w, http.StatusOK, map[string]any{
+						"ok":     true,
+						"status": "unchanged",
+						"addr":   normalized,
+					})
+					return
+				}
+
+				log.Printf("[peers] accepted runtime mutation from=%s addr=%s", r.RemoteAddr, normalized)
+				go m.ConnectToPeers([]string{normalized})
+				writeJSON(w, http.StatusOK, map[string]any{
+					"ok":     true,
+					"status": "added",
+					"addr":   normalized,
+				})
+				return
 			}
 
 			m.lock.RLock()
