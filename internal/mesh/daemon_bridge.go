@@ -83,6 +83,10 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 		return nil, err
 	}
 
+	if err := preflightBindCheck(cfg.Listen, cfg.HttpListen); err != nil {
+		return nil, err
+	}
+
 	// ===== CONFIG SNAPSHOT (SOURCE OF TRUTH) =====
 	log.Println("[mesh] ===== CONFIG SNAPSHOT =====")
 	log.Println("[mesh] node_id =", cfg.NodeID)
@@ -389,6 +393,24 @@ func (m *meshDaemon) Shutdown(ctx context.Context) error {
 		return m.listener.Close()
 	}
 
+	return nil
+}
+
+func preflightBindCheck(addrs ...string) error {
+	held := make([]net.Listener, 0, len(addrs))
+	for _, addr := range addrs {
+		l, err := net.Listen("tcp", addr)
+		if err != nil {
+			for _, heldL := range held {
+				_ = heldL.Close()
+			}
+			return fmt.Errorf("startup validation: address %s is unavailable: %w", addr, err)
+		}
+		held = append(held, l)
+	}
+	for _, l := range held {
+		_ = l.Close()
+	}
 	return nil
 }
 
