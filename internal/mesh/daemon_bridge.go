@@ -296,15 +296,19 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 		m.registerChainHandlers(mux)
 
 		m.httpSrv = &http.Server{
-			Addr:    cfg.HttpListen,
-			Handler: buildHTTPMiddleware(cfg)(mux),
+			Addr:              cfg.HttpListen,
+			Handler:           buildHTTPMiddleware(cfg)(mux),
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       15 * time.Second,
+			WriteTimeout:      15 * time.Second,
+			IdleTimeout:       30 * time.Second,
+			MaxHeaderBytes:    8 << 10,
 			TLSConfig: &tls.Config{
 				MinVersion: tls.VersionTLS12,
 			},
 		}
 
 		mux.HandleFunc("/peers", func(w http.ResponseWriter, r *http.Request) {
-
 			if r.Method == http.MethodPost {
 				if !m.adminEndpointsEnabled {
 					log.Printf("[peers] rejected runtime mutation from=%s reason=admin_surface_disabled", r.RemoteAddr)
@@ -329,13 +333,10 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 					Addr string `json:"addr"`
 				}
 
-				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				if err := decodeJSONBody(w, r, maxJSONBodyBytes, &req); err != nil {
 					m.recordRejectedPeerMutation("bad_json")
 					log.Printf("[peers] rejected runtime mutation from=%s reason=bad_json err=%v", r.RemoteAddr, err)
-					writeJSON(w, http.StatusBadRequest, map[string]any{
-						"ok":    false,
-						"error": "invalid request body",
-					})
+					writeAPIError(r, w, http.StatusBadRequest, "invalid_json", err.Error())
 					return
 				}
 
@@ -343,29 +344,20 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 				if addr == "" {
 					m.recordRejectedPeerMutation("empty_addr")
 					log.Printf("[peers] rejected runtime mutation from=%s reason=empty_addr", r.RemoteAddr)
-					writeJSON(w, http.StatusBadRequest, map[string]any{
-						"ok":    false,
-						"error": "missing addr",
-					})
+					writeAPIError(r, w, http.StatusBadRequest, "missing_addr", "missing addr")
 					return
 				}
 				normalized, err := validateTCPAddress("peer", addr)
 				if err != nil {
 					m.recordRejectedPeerMutation("invalid_addr")
 					log.Printf("[peers] rejected runtime mutation from=%s reason=invalid_addr addr=%q err=%v", r.RemoteAddr, addr, err)
-					writeJSON(w, http.StatusBadRequest, map[string]any{
-						"ok":    false,
-						"error": err.Error(),
-					})
+					writeAPIError(r, w, http.StatusBadRequest, "invalid_addr", err.Error())
 					return
 				}
 				if normalized == m.id {
 					m.recordRejectedPeerMutation("self")
 					log.Printf("[peers] rejected runtime mutation from=%s reason=self addr=%s", r.RemoteAddr, normalized)
-					writeJSON(w, http.StatusBadRequest, map[string]any{
-						"ok":    false,
-						"error": "peer mutation rejected: self address not allowed",
-					})
+					writeAPIError(r, w, http.StatusBadRequest, "self_peer", "peer mutation rejected: self address not allowed")
 					return
 				}
 
@@ -403,6 +395,9 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 					"status": "added",
 					"addr":   normalized,
 				})
+				return
+			}
+			if !requireMethod(w, r, http.MethodGet) {
 				return
 			}
 

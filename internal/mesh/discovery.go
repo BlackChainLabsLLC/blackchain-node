@@ -164,36 +164,43 @@ func (m *meshDaemon) discoveryStatus() map[string]any {
 	}
 }
 
-func (m *meshDaemon) handleDiscoveryStatus(w http.ResponseWriter, _ *http.Request) {
+func (m *meshDaemon) handleDiscoveryStatus(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(m.discoveryStatus())
 }
 
-func (m *meshDaemon) handleDiscoveryPeers(w http.ResponseWriter, _ *http.Request) {
+func (m *meshDaemon) handleDiscoveryPeers(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"peers": m.discoverySnapshot()})
 }
 
 func (m *meshDaemon) handleDiscoveryRegister(w http.ResponseWriter, r *http.Request) {
 	// Client posts {"addr":"ip:port"} to leader
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !requireMethod(w, r, http.MethodPost) {
 		return
 	}
 	var req struct {
 		Addr string `json:"addr"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
-	_ = r.Body.Close()
+	if err := decodeJSONBody(w, r, maxJSONBodyBytes, &req); err != nil {
+		writeAPIError(r, w, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
 
 	addr := strings.TrimSpace(req.Addr)
 	if addr == "" {
-		http.Error(w, "missing addr", http.StatusBadRequest)
+		writeAPIError(r, w, http.StatusBadRequest, "missing_addr", "missing addr")
 		return
 	}
 	// naive sanity: must contain colon port
 	if !strings.Contains(addr, ":") {
-		http.Error(w, "bad addr", http.StatusBadRequest)
+		writeAPIError(r, w, http.StatusBadRequest, "bad_addr", "bad addr")
 		return
 	}
 

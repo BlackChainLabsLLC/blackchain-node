@@ -159,8 +159,16 @@ func buildHTTPMiddleware(cfg *MeshConfig) func(http.Handler) http.Handler {
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			r = withRequestID(r)
+			w.Header().Set(requestIDHeader, requestIDFromContext(r.Context()))
+
 			ip := clientIP(r)
 			cost := rateCost(r.URL.Path)
+
+			if strings.HasPrefix(r.URL.Path, "/debug/") && !isLoopbackIP(ip) {
+				writeAPIError(r, w, http.StatusForbidden, "debug_surface_forbidden", "debug endpoints are restricted to loopback clients")
+				return
+			}
 
 			// LOOPBACK WRITE EXEMPT (Phase 6.19 LEGO):
 			// Keep rate limits for reads (e.g. /chain/status), but never block local

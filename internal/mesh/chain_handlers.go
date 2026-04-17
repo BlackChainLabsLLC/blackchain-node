@@ -54,6 +54,9 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 	// GET /debug/wallet
 	// --------------------
 	mux.HandleFunc("/debug/wallet", func(w http.ResponseWriter, r *http.Request) {
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
 		if !m.requireDebugSurface(w) {
 			return
 		}
@@ -71,7 +74,10 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 		})
 	})
 
-	mux.HandleFunc("/chain/height", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/chain/height", func(w http.ResponseWriter, r *http.Request) {
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
 		m.chain.mu.RLock()
 		h := m.chain.height
 		m.chain.mu.RUnlock()
@@ -106,6 +112,9 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 	// STATUS
 	// --------------------
 	mux.HandleFunc("/chain/status", func(w http.ResponseWriter, r *http.Request) {
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
 		m.chain.mu.RLock()
 		height := m.chain.height
 		tip := m.chain.tip
@@ -131,6 +140,9 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 
 	// ===== PHASE 9: /chain/finality =====
 	mux.HandleFunc("/chain/finality", func(w http.ResponseWriter, r *http.Request) {
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
 		h, tip, depth := m.chain.GetFinalitySnapshot()
 
 		resp := map[string]any{
@@ -147,15 +159,18 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 	// BLOCK BY HEIGHT
 	// --------------------
 	mux.HandleFunc("/chain/block", func(w http.ResponseWriter, r *http.Request) {
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
 		hstr := r.URL.Query().Get("h")
 		if hstr == "" {
-			http.Error(w, "missing height", 400)
+			writeAPIError(r, w, http.StatusBadRequest, "missing_height", "missing height")
 			return
 		}
 
 		h, err := strconv.ParseInt(hstr, 10, 64)
 		if err != nil {
-			http.Error(w, "bad height", 400)
+			writeAPIError(r, w, http.StatusBadRequest, "bad_height", "bad height")
 			return
 		}
 
@@ -164,7 +179,7 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 		m.chain.mu.RUnlock()
 
 		if !ok {
-			http.Error(w, "not found", 404)
+			writeAPIError(r, w, http.StatusNotFound, "not_found", "block not found")
 			return
 		}
 
@@ -175,9 +190,12 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 	// ADD TX (MEMPOOL ENTRY)
 	// --------------------
 	mux.HandleFunc("/chain/tx", func(w http.ResponseWriter, r *http.Request) {
+		if !requireMethod(w, r, http.MethodPost) {
+			return
+		}
 		var tx Tx
-		if err := json.NewDecoder(r.Body).Decode(&tx); err != nil {
-			http.Error(w, err.Error(), 400)
+		if err := decodeJSONBody(w, r, maxJSONBodyBytes, &tx); err != nil {
+			writeAPIError(r, w, http.StatusBadRequest, "invalid_json", err.Error())
 			return
 		}
 
@@ -185,7 +203,7 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 		defer m.chain.mu.Unlock()
 
 		if err := m.chain.addTxToMempoolLocked(tx); err != nil {
-			http.Error(w, err.Error(), 400)
+			writeAPIError(r, w, http.StatusBadRequest, "tx_rejected", err.Error())
 			return
 		}
 
@@ -196,6 +214,9 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 	// BALANCES (READ ONLY)
 	// --------------------
 	mux.HandleFunc("/chain/balances", func(w http.ResponseWriter, r *http.Request) {
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
 		m.chain.mu.RLock()
 		defer m.chain.mu.RUnlock()
 
@@ -212,6 +233,9 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 	// GET /chain/mempool
 	// --------------------
 	mux.HandleFunc("/chain/mempool", func(w http.ResponseWriter, r *http.Request) {
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
 		m.chain.mu.RLock()
 		defer m.chain.mu.RUnlock()
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -224,9 +248,12 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 	// APPLY BLOCK (SYNC)
 	// --------------------
 	mux.HandleFunc("/chain/apply", func(w http.ResponseWriter, r *http.Request) {
+		if !requireMethod(w, r, http.MethodPost) {
+			return
+		}
 		var b Block
-		if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
-			http.Error(w, err.Error(), 400)
+		if err := decodeJSONBody(w, r, maxJSONBodyBytes, &b); err != nil {
+			writeAPIError(r, w, http.StatusBadRequest, "invalid_json", err.Error())
 			return
 		}
 
@@ -235,7 +262,7 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 		fh := m.chain.finalizedHeight
 		if fh > 0 && b.Height <= fh {
 			m.chain.mu.Unlock()
-			http.Error(w, fmt.Sprintf("finalized guard: height=%d finalized=%d", b.Height, fh), http.StatusConflict)
+			writeAPIError(r, w, http.StatusConflict, "finalized_guard", fmt.Sprintf("finalized guard: height=%d finalized=%d", b.Height, fh))
 			return
 		}
 
@@ -243,7 +270,7 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 		m.chain.mu.Unlock()
 
 		if err != nil {
-			http.Error(w, err.Error(), 400)
+			writeAPIError(r, w, http.StatusBadRequest, "block_rejected", err.Error())
 			return
 		}
 
@@ -253,6 +280,9 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 	// LOCAL PROPOSE
 	// --------------------
 	mux.HandleFunc("/chain/propose", func(w http.ResponseWriter, r *http.Request) {
+		if !requireMethod(w, r, http.MethodPost) {
+			return
+		}
 		if !m.requireAdminSurface(w) {
 			return
 		}
@@ -264,7 +294,7 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 		m.chain.mu.Unlock()
 
 		if err != nil {
-			http.Error(w, err.Error(), 400)
+			writeAPIError(r, w, http.StatusBadRequest, "proposal_rejected", err.Error())
 			return
 		}
 
@@ -278,6 +308,9 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 	// PROPOSE + GOSSIP
 	// --------------------
 	mux.HandleFunc("/chain/propose_broadcast", func(w http.ResponseWriter, r *http.Request) {
+		if !requireMethod(w, r, http.MethodPost) {
+			return
+		}
 		if !m.requireAdminSurface(w) {
 			return
 		}
@@ -288,7 +321,7 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 		}
 		if err != nil {
 			m.chain.mu.Unlock()
-			http.Error(w, err.Error(), 400)
+			writeAPIError(r, w, http.StatusBadRequest, "proposal_rejected", err.Error())
 			return
 		}
 		b := m.chain.blocks[m.chain.height]
@@ -299,6 +332,9 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 
 	// DEBUG: identity inspection
 	mux.HandleFunc("/debug/nodeid", func(w http.ResponseWriter, r *http.Request) {
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
 		if !m.requireDebugSurface(w) {
 			return
 		}
@@ -313,6 +349,9 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 	// GET /debug/finality
 	// GET /debug/finality?h=12   (includes block finalized flag for that height if present)
 	mux.HandleFunc("/debug/finality", func(w http.ResponseWriter, r *http.Request) {
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
 		if !m.requireDebugSurface(w) {
 			return
 		}
@@ -347,6 +386,9 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 	})
 
 	mux.HandleFunc("/debug/ops", func(w http.ResponseWriter, r *http.Request) {
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
 		if !m.requireDebugSurface(w) {
 			return
 		}
