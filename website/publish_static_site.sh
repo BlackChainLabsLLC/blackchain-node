@@ -15,7 +15,7 @@ cp "${ROOT_DIR}/index.html" "${TARGET_DIR}/index.html"
 cp "${ROOT_DIR}/styles.css" "${TARGET_DIR}/styles.css"
 cp "${ROOT_DIR}/app.js" "${TARGET_DIR}/app.js"
 
-for route in pricing host-site operator territory founder; do
+for route in pricing host-site operator territory founder leads; do
   mkdir -p "${TARGET_DIR}/${route}"
   cp "${ROOT_DIR}/${route}/index.html" "${TARGET_DIR}/${route}/index.html"
 done
