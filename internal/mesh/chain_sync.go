@@ -28,8 +28,10 @@ func (m *meshDaemon) bootstrapSync(ctx context.Context) {
 	for {
 		peers := m.reachablePeers()
 		if len(peers) > 0 {
+			m.diag.clearSyncDegraded()
 			break
 		}
+		m.diag.addDegradedReason("sync_waiting_for_reachable_peers", "bootstrap sync waiting for reachable peers")
 		time.Sleep(500 * time.Millisecond)
 	}
 
@@ -63,6 +65,7 @@ func (m *meshDaemon) bootstrapSync(ctx context.Context) {
 			h, tip, err := m.requestPeerHeight(addr)
 			if err != nil {
 				log.Printf("[sync] height err %s: %v", addr, err)
+				m.diag.incSyncFailure(fmt.Sprintf("request_peer_height_failed:%s", addr))
 				continue
 			}
 			cands = append(cands, cand{addr, h, tip})
@@ -103,13 +106,16 @@ func (m *meshDaemon) bootstrapSync(ctx context.Context) {
 			blocks, err := m.requestPeerRange(best.Addr, cur, end)
 			if err != nil {
 				log.Printf("[sync] range err %v", err)
+				m.diag.incSyncFailure(fmt.Sprintf("request_peer_range_failed:%s:%d-%d", best.Addr, cur, end))
 				time.Sleep(750 * time.Millisecond)
 				continue
 			}
 
 			m.chain.mu.Lock()
 			for _, b := range blocks {
-				_, _ = m.chain.applyBlockOrBufferLocked(b)
+				if _, err := m.chain.applyBlockOrBufferLocked(b); err != nil {
+					m.diag.incSyncFailure(fmt.Sprintf("apply_synced_block_failed:h=%d", b.Height))
+				}
 			}
 			_ = m.chain.drainPendingLocked()
 			m.chain.mu.Unlock()
@@ -121,6 +127,7 @@ func (m *meshDaemon) bootstrapSync(ctx context.Context) {
 		m.chain.mu.RUnlock()
 
 		log.Printf("[sync] done height=%d tip=%s", h, t)
+		m.diag.clearSyncDegraded()
 		// NOTE: do not return; keep syncing for future blocks
 		time.Sleep(750 * time.Millisecond)
 		continue

@@ -1,14 +1,15 @@
 package mesh
 
 import (
-	"regexp"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 )
+
 func (c *ProductionChain) blockDir() string {
 	root := c.persistDir
 	if root == "" {
@@ -82,12 +83,24 @@ func (c *ProductionChain) loadFromDisk() error {
 		if err := json.Unmarshal(raw, &b); err != nil {
 			if f.h == maxH {
 				log.Printf("[chain] skipping malformed tail block height=%d path=%s err=%v", f.h, f.p, err)
+				if c.daemon != nil {
+					c.daemon.diag.incReplayTailSkip()
+				}
 				continue
+			}
+			if c.daemon != nil {
+				c.daemon.diag.incReplayFailure(fmt.Sprintf("decode height=%d", f.h))
 			}
 			return fmt.Errorf("replay decode height %d path %s: %w", f.h, f.p, err)
 		}
 		if err := c.applyBlockLocked(b); err != nil {
+			if c.daemon != nil {
+				c.daemon.diag.incReplayFailure(fmt.Sprintf("apply height=%d", b.Height))
+			}
 			return fmt.Errorf("replay height %d: %w", b.Height, err)
+		}
+		if c.daemon != nil {
+			c.daemon.diag.incReplayApplied(1)
 		}
 	}
 

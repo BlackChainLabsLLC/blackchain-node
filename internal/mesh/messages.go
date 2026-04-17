@@ -114,6 +114,7 @@ func (m *meshDaemon) handleIncoming(conn net.Conn) {
 		var b Block
 		if err := json.Unmarshal([]byte(wm.Body), &b); err != nil {
 			log.Printf("[block] decode error id=%s from=%s via=%s: %v", wm.ID, wm.From, wm.Via, err)
+			m.diag.incSyncFailure("gossip_block_decode_failed")
 			return
 		}
 
@@ -123,11 +124,13 @@ func (m *meshDaemon) handleIncoming(conn net.Conn) {
 		m.chain.mu.Unlock()
 		if err != nil {
 			log.Printf("[block] apply error height=%d id=%s from=%s via=%s: %v", b.Height, wm.ID, wm.From, wm.Via, err)
+			m.diag.incSyncFailure(fmt.Sprintf("gossip_block_apply_failed:h=%d", b.Height))
 			return
 		}
 
 		if applied {
 			log.Printf("[block] applied height=%d id=%s from=%s via=%s ttl=%d", b.Height, wm.ID, wm.From, wm.Via, wm.TTL)
+			m.diag.clearSyncDegraded()
 		} else {
 			log.Printf("[block] buffered height=%d id=%s from=%s via=%s ttl=%d", b.Height, wm.ID, wm.From, wm.Via, wm.TTL)
 		}
@@ -177,18 +180,21 @@ func (m *meshDaemon) maybeSyncFromSignedState(via string, body string) bool {
 		resp, err := client.Get(url)
 		if err != nil {
 			log.Printf("[sync] fetch error from=%s url=%s: %v", via, url, err)
+			m.diag.incSyncFailure(fmt.Sprintf("signed_state_fetch_failed:%s", via))
 			return true
 		}
 		b, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		if resp.StatusCode != 200 {
 			log.Printf("[sync] fetch non-200 from=%s url=%s code=%d body=%q", via, url, resp.StatusCode, strings.TrimSpace(string(b)))
+			m.diag.incSyncFailure(fmt.Sprintf("signed_state_fetch_non_200:%d", resp.StatusCode))
 			return true
 		}
 
 		var blk Block
 		if err := json.Unmarshal(b, &blk); err != nil {
 			log.Printf("[sync] decode error from=%s h=%d: %v", via, h, err)
+			m.diag.incSyncFailure(fmt.Sprintf("signed_state_decode_failed:h=%d", h))
 			return true
 		}
 
@@ -198,10 +204,12 @@ func (m *meshDaemon) maybeSyncFromSignedState(via string, body string) bool {
 		m.chain.mu.Unlock()
 		if err != nil {
 			log.Printf("[sync] apply error from=%s h=%d: %v", via, h, err)
+			m.diag.incSyncFailure(fmt.Sprintf("signed_state_apply_failed:h=%d", h))
 			return true
 		}
 		if applied {
 			log.Printf("[sync] applied h=%d from=%s", h, via)
+			m.diag.clearSyncDegraded()
 		} else {
 			log.Printf("[sync] buffered h=%d from=%s", h, via)
 		}

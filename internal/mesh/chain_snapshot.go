@@ -1,7 +1,6 @@
 package mesh
 
 import (
-	"regexp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -9,8 +8,10 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 )
+
 type ChainSnapshot struct {
 	Height       int64              `json:"height"`
 	Hash         string             `json:"hash"`
@@ -74,13 +75,22 @@ func (c *ProductionChain) LoadSnapshotFromDisk() (bool, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			if c.daemon != nil {
+				c.daemon.diag.markSnapshotLoaded(false)
+			}
 			return false, nil
+		}
+		if c.daemon != nil {
+			c.daemon.diag.incReplayFailure("snapshot_read_failed")
 		}
 		return false, err
 	}
 
 	var snap ChainSnapshot
 	if err := json.Unmarshal(raw, &snap); err != nil {
+		if c.daemon != nil {
+			c.daemon.diag.incReplayFailure("snapshot_decode_failed")
+		}
 		return false, err
 	}
 
@@ -93,16 +103,31 @@ func (c *ProductionChain) LoadSnapshotFromDisk() (bool, error) {
 		c.accounts[k] = &vv
 	}
 	if snap.AccountsHash == "" {
+		if c.daemon != nil {
+			c.daemon.diag.incReplayFailure("snapshot_missing_accounts_hash")
+		}
 		return false, fmt.Errorf("snapshot missing accounts_hash")
 	}
 	if computeAccountsHash(c.accounts) != snap.AccountsHash {
+		if c.daemon != nil {
+			c.daemon.diag.incReplayFailure("snapshot_accounts_hash_mismatch")
+		}
 		return false, fmt.Errorf("snapshot accounts_hash mismatch")
 	}
 	if snap.SnapshotHash == "" {
+		if c.daemon != nil {
+			c.daemon.diag.incReplayFailure("snapshot_missing_hash")
+		}
 		return false, fmt.Errorf("snapshot missing snapshot_hash")
 	}
 	if computeSnapshotHash(snap.Height, snap.Hash, snap.AccountsHash) != snap.SnapshotHash {
+		if c.daemon != nil {
+			c.daemon.diag.incReplayFailure("snapshot_hash_mismatch")
+		}
 		return false, fmt.Errorf("snapshot hash mismatch")
+	}
+	if c.daemon != nil {
+		c.daemon.diag.markSnapshotLoaded(true)
 	}
 	c.blocks = make(map[int64]Block)
 	c.pending = make(map[int64]Block)
@@ -149,13 +174,25 @@ func (c *ProductionChain) LoadSnapshotFromDisk() (bool, error) {
 		if err := json.Unmarshal(raw, &b); err != nil {
 			if f.h == maxH {
 				log.Printf("[snapshot] skipping malformed tail block height=%d path=%s err=%v", f.h, f.p, err)
+				if c.daemon != nil {
+					c.daemon.diag.incReplayTailSkip()
+				}
 				continue
+			}
+			if c.daemon != nil {
+				c.daemon.diag.incReplayFailure(fmt.Sprintf("snapshot_replay_decode_height_%d", f.h))
 			}
 			return false, fmt.Errorf("replay post-snapshot decode height %d path %s: %w", f.h, f.p, err)
 		}
 		// Use full validation
 		if err := c.applyBlockLocked(b); err != nil {
+			if c.daemon != nil {
+				c.daemon.diag.incReplayFailure(fmt.Sprintf("snapshot_replay_apply_height_%d", b.Height))
+			}
 			return false, fmt.Errorf("replay post-snapshot height %d: %w", b.Height, err)
+		}
+		if c.daemon != nil {
+			c.daemon.diag.incReplayApplied(1)
 		}
 	}
 

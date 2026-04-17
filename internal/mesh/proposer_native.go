@@ -24,9 +24,11 @@ func (m *meshDaemon) startProposerLoop() {
 
 			if err != nil {
 				log.Printf("[proposer] propose error: %v", err)
+				m.diag.incProposalFailure(err.Error())
 				m.chain.mu.Unlock()
 				continue
 			}
+			m.diag.clearProposalDegraded()
 
 			var out Block
 			if after > before {

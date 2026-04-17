@@ -72,14 +72,19 @@ type meshDaemon struct {
 	discoMu    sync.RWMutex
 	discoCfg   discoveryConfig
 	discoPeers map[string]discoveredPeer
+
+	diag *runtimeDiagnostics
 }
 
 /* ===================== START DAEMON ===================== */
 
 func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, error) {
+	diag := newRuntimeDiagnostics()
+	diag.setStartupPhase("load_config")
 
 	cfg, err := LoadMeshConfig(opts.MeshConfigPath)
 	if err != nil {
+		diag.setHalted("config_load_failed")
 		return nil, err
 	}
 
@@ -91,8 +96,10 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 	log.Println("[mesh] peers   =", cfg.Peers)
 	log.Println("[mesh] =================================")
 
+	diag.setStartupPhase("open_mesh_listener")
 	ln, err := meshListen(cfg.Listen, cfg.TLS)
 	if err != nil {
+		diag.setHalted("mesh_listener_failed")
 		return nil, fmt.Errorf("listen %s: %w", cfg.Listen, err)
 	}
 
@@ -111,8 +118,10 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 
 	walletPath := filepath.Join(dataDir, "wallet.json")
 
+	diag.setStartupPhase("wallet_init")
 	w, err := crypto.LoadOrCreateWallet(walletPath)
 	if err != nil {
+		diag.setHalted("wallet_load_failed")
 		return nil, err
 	}
 
@@ -167,6 +176,7 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 		seen:       make(map[string]time.Time),
 		reputation: make(map[string]*Reputation),
 		uc:         make(map[string]*UCRecord),
+		diag:       diag,
 	}
 
 	m.chain.ensureGenesisLocked()
@@ -175,11 +185,15 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 	m.chain.dataDir = m.dataDir
 	m.chain.persistDir = m.persistDir
 
+	diag.setStartupPhase("snapshot_recovery")
 	if _, err := m.chain.LoadSnapshotFromDisk(); err != nil {
+		diag.setHalted("snapshot_recovery_failed")
 		return nil, err
 	}
 
+	diag.setStartupPhase("replay_persisted_blocks")
 	if err := m.chain.loadFromDisk(); err != nil {
+		diag.setHalted("replay_failed")
 		return nil, err
 	}
 
@@ -240,6 +254,7 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 	}
 
 	if cfg.HttpListen != "" {
+		diag.setStartupPhase("http_tls_prepare")
 
 		httpHost := "127.0.0.1"
 		if h, _, err := net.SplitHostPort(strings.TrimSpace(cfg.HttpListen)); err == nil && strings.TrimSpace(h) != "" {
@@ -250,6 +265,7 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 
 		httpCertPath, httpKeyPath, err := ensureHTTPServerTLSFiles(dataDir, httpHost)
 		if err != nil {
+			diag.setHalted("http_tls_prepare_failed")
 			return nil, fmt.Errorf("http tls files: %w", err)
 		}
 
@@ -373,6 +389,8 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 
 		}()
 	}
+	diag.markStartupComplete()
+	log.Printf("[state] ready state=%s phase=%s", diag.snapshot().State, diag.snapshot().StartupPhase)
 
 	return m, nil
 }
@@ -419,12 +437,14 @@ func (m *meshDaemon) startPeerDialLoop() {
 				conn, err := meshDialTimeout(ctx, addr, 2*time.Second, m.tlsCfg)
 				if err != nil {
 					m.TouchReachable(addr, false)
+					m.diag.incPeerFailure(fmt.Sprintf("dial_failed:%s", addr))
 					cancel()
 					continue
 				}
 
 				_ = conn.Close()
 				m.TouchReachable(addr, true)
+				m.diag.clearPeerDegraded()
 				cancel()
 			}
 		}
