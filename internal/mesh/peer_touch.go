@@ -133,6 +133,9 @@ func (m *meshDaemon) TouchReachable(addr string, ok bool) {
 		return
 	}
 	p.FailureCount++
+	if m != nil {
+		m.recordPeerFailure(addr, "dial/connect failure")
+	}
 	if p.FailureCount >= peerFailureSuppressAfter {
 		steps := p.FailureCount - peerFailureSuppressAfter + 1
 		suppressFor := time.Duration(steps) * peerFailureSuppressStep
@@ -140,6 +143,9 @@ func (m *meshDaemon) TouchReachable(addr string, ok bool) {
 			suppressFor = peerFailureSuppressMax
 		}
 		p.SuppressedUntil = time.Now().Add(suppressFor)
+		if m != nil {
+			m.recordPeerSuppression(addr, p.SuppressedUntil, "dial failure suppression")
+		}
 	}
 }
 
@@ -161,11 +167,17 @@ func (m *meshDaemon) noteSyncFailure(addr string, err error) time.Duration {
 	if err != nil {
 		p.LastSyncErr = err.Error()
 	}
+	if m != nil {
+		m.recordPeerFailure(addr, "sync failure")
+	}
 	suppressFor := time.Duration(p.SyncFailures) * syncFailureSuppressStep
 	if suppressFor > syncFailureSuppressMax {
 		suppressFor = syncFailureSuppressMax
 	}
 	p.SuppressedUntil = time.Now().Add(suppressFor)
+	if m != nil {
+		m.recordPeerSuppression(addr, p.SuppressedUntil, "sync suppression")
+	}
 	return suppressFor
 }
 

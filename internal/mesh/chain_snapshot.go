@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -185,6 +186,10 @@ func (c *ProductionChain) recoverInterruptedSnapshotWrite() error {
 	if err := syncDir(filepath.Dir(path)); err != nil {
 		return err
 	}
+	if c.daemon != nil {
+		c.daemon.recordRecoveryEvent("snapshot_tmp_promoted", fmt.Sprintf("tmp=%s final=%s height=%d", tmpPath, path, snap.Height))
+	}
+	log.Printf("[recovery] promoted interrupted snapshot write tmp=%s final=%s height=%d", tmpPath, path, snap.Height)
 	return nil
 }
 

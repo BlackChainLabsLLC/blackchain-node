@@ -86,19 +86,31 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 	})
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
 		status := m.operatorStatusSnapshot()
-		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":     true,
+		code := http.StatusOK
+		ok := true
+		if live, _ := status["live"].(bool); !live {
+			code = http.StatusServiceUnavailable
+			ok = false
+		}
+		writeJSON(w, code, map[string]any{
+			"ok":     ok,
 			"status": status,
 		})
 	})
 
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
 		status := m.operatorStatusSnapshot()
-		if ready, _ := status["startup_ready"].(bool); !ready {
+		if ready, _ := status["ready"].(bool); !ready {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
 				"ok":     false,
-				"error":  "startup not ready",
+				"error":  "node not ready",
 				"status": status,
 			})
 			return

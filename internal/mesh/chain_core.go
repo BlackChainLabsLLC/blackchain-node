@@ -553,7 +553,12 @@ func (c *ProductionChain) applyBlockLocked(b Block) error {
 	return nil
 }
 
-func (c *ProductionChain) applyBlockOrBufferLocked(b Block) (bool, error) {
+func (c *ProductionChain) applyBlockOrBufferLocked(b Block) (applied bool, err error) {
+	defer func() {
+		if err != nil && c.daemon != nil {
+			c.daemon.recordProposalFailure(err)
+		}
+	}()
 	c.observeValidatorLocked(b.Producer)
 
 	h := b.Height

@@ -91,13 +91,23 @@ type meshDaemon struct {
 
 	statusMu                  sync.RWMutex
 	startedAt                 time.Time
+	startupPhase              string
 	startupReady              bool
+	shutdownInitiated         bool
 	replayFailureCount        int64
 	lastReplayError           string
 	syncErrorCount            int64
 	lastSyncError             string
 	lastSyncLocalHeight       int64
 	lastSyncBestHeight        int64
+	peerFailureCount          int64
+	lastPeerFailure           string
+	peerSuppressionCount      int64
+	lastPeerSuppression       string
+	proposalFailureCount      int64
+	lastProposalFailure       string
+	recoveryEventCount        int64
+	lastRecoveryEvent         string
 	rejectedPeerMutationCount int64
 	lastRejectedPeerMutation  string
 }
@@ -205,6 +215,8 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 		startedAt:  time.Now().UTC(),
 	}
 	m.runCtx, m.runCancel = context.WithCancel(ctx)
+	m.setStartupPhase("config_loaded")
+	m.setStartupPhase("replay_snapshot")
 
 	m.chain.ensureGenesisLocked()
 	m.chain.daemon = m
@@ -220,6 +232,7 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 	}
 	log.Printf("[startup] snapshot replay loaded=%v", snapshotLoaded)
 
+	m.setStartupPhase("replay_blocks")
 	if err := m.chain.loadFromDisk(); err != nil {
 		m.recordReplayFailure(err)
 		log.Printf("[startup] block replay failed: %v", err)
@@ -228,6 +241,7 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 
 	m.chain.daemon = m
 
+	m.setStartupPhase("validator_identity")
 	m.chain.mu.Lock()
 
 	localID, err := m.chain.EnsureValidatorIdentityLocked()
@@ -240,6 +254,7 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 	}
 
 	m.chain.mu.Unlock()
+	m.setStartupPhase("runtime_starting")
 	m.markStartupReady()
 	m.chain.mu.RLock()
 	log.Printf("[startup] ready node_id=%s height=%d tip=%s peers=%d data_dir=%s", m.nodeID, m.chain.height, m.chain.tip, len(m.peers), m.dataDir)
@@ -502,6 +517,10 @@ func buildStartupPeerSet(configPeers, bootstrapPeers []string) (map[string]struc
 
 func (m *meshDaemon) Shutdown(ctx context.Context) error {
 	m.shutdownOnce.Do(func() {
+		m.statusMu.Lock()
+		m.shutdownInitiated = true
+		m.statusMu.Unlock()
+		log.Printf("[startup] phase=shutdown")
 		if m.runCancel != nil {
 			m.runCancel()
 		}
@@ -523,8 +542,24 @@ func (m *meshDaemon) Shutdown(ctx context.Context) error {
 
 func (m *meshDaemon) markStartupReady() {
 	m.statusMu.Lock()
+	m.startupPhase = "ready"
 	m.startupReady = true
 	m.statusMu.Unlock()
+}
+
+func (m *meshDaemon) setStartupPhase(phase string) {
+	phase = strings.TrimSpace(phase)
+	if phase == "" {
+		return
+	}
+	m.statusMu.Lock()
+	if m.startupPhase == phase {
+		m.statusMu.Unlock()
+		return
+	}
+	m.startupPhase = phase
+	m.statusMu.Unlock()
+	log.Printf("[startup] phase=%s", phase)
 }
 
 func (m *meshDaemon) recordReplayFailure(err error) {
@@ -554,6 +589,52 @@ func (m *meshDaemon) recordSyncError(err error) {
 	m.statusMu.Unlock()
 }
 
+func (m *meshDaemon) recordPeerFailure(addr, reason string) {
+	if strings.TrimSpace(reason) == "" {
+		return
+	}
+	msg := strings.TrimSpace(reason)
+	if strings.TrimSpace(addr) != "" {
+		msg = fmt.Sprintf("peer=%s %s", strings.TrimSpace(addr), msg)
+	}
+	m.statusMu.Lock()
+	m.peerFailureCount++
+	m.lastPeerFailure = msg
+	m.statusMu.Unlock()
+}
+
+func (m *meshDaemon) recordPeerSuppression(addr string, until time.Time, reason string) {
+	msg := strings.TrimSpace(reason)
+	if strings.TrimSpace(addr) != "" {
+		msg = fmt.Sprintf("peer=%s until=%s %s", strings.TrimSpace(addr), until.UTC().Format(time.RFC3339), msg)
+	}
+	m.statusMu.Lock()
+	m.peerSuppressionCount++
+	m.lastPeerSuppression = strings.TrimSpace(msg)
+	m.statusMu.Unlock()
+}
+
+func (m *meshDaemon) recordProposalFailure(err error) {
+	if err == nil {
+		return
+	}
+	m.statusMu.Lock()
+	m.proposalFailureCount++
+	m.lastProposalFailure = err.Error()
+	m.statusMu.Unlock()
+}
+
+func (m *meshDaemon) recordRecoveryEvent(kind, detail string) {
+	msg := strings.TrimSpace(kind)
+	if strings.TrimSpace(detail) != "" {
+		msg = fmt.Sprintf("%s: %s", msg, strings.TrimSpace(detail))
+	}
+	m.statusMu.Lock()
+	m.recoveryEventCount++
+	m.lastRecoveryEvent = msg
+	m.statusMu.Unlock()
+}
+
 func (m *meshDaemon) recordRejectedPeerMutation(reason string) {
 	m.statusMu.Lock()
 	m.rejectedPeerMutationCount++
@@ -561,16 +642,66 @@ func (m *meshDaemon) recordRejectedPeerMutation(reason string) {
 	m.statusMu.Unlock()
 }
 
+func (m *meshDaemon) runtimeStateSnapshot() (state string, reasons []string, live bool, ready bool) {
+	m.statusMu.RLock()
+	startupPhase := m.startupPhase
+	startupReady := m.startupReady
+	shutdownInitiated := m.shutdownInitiated
+	replayFailureCount := m.replayFailureCount
+	syncErrorCount := m.syncErrorCount
+	peerFailureCount := m.peerFailureCount
+	peerSuppressionCount := m.peerSuppressionCount
+	proposalFailureCount := m.proposalFailureCount
+	m.statusMu.RUnlock()
+
+	if shutdownInitiated {
+		return "halted", []string{"shutdown_initiated"}, false, false
+	}
+	if !startupReady {
+		reasons = append(reasons, fmt.Sprintf("startup_phase=%s", startupPhase))
+		return "startup", reasons, true, false
+	}
+	if replayFailureCount > 0 {
+		reasons = append(reasons, "replay_failures_present")
+	}
+	if syncErrorCount > 0 {
+		reasons = append(reasons, "sync_errors_present")
+	}
+	if peerFailureCount > 0 {
+		reasons = append(reasons, "peer_failures_present")
+	}
+	if peerSuppressionCount > 0 {
+		reasons = append(reasons, "peer_suppressions_present")
+	}
+	if proposalFailureCount > 0 {
+		reasons = append(reasons, "proposal_failures_present")
+	}
+	if len(reasons) > 0 {
+		return "degraded", reasons, true, true
+	}
+	return "healthy", nil, true, true
+}
+
 func (m *meshDaemon) operatorStatusSnapshot() map[string]any {
 	m.statusMu.RLock()
 	startedAt := m.startedAt
+	startupPhase := m.startupPhase
 	startupReady := m.startupReady
+	shutdownInitiated := m.shutdownInitiated
 	replayFailureCount := m.replayFailureCount
 	lastReplayError := m.lastReplayError
 	syncErrorCount := m.syncErrorCount
 	lastSyncError := m.lastSyncError
 	lastSyncLocalHeight := m.lastSyncLocalHeight
 	lastSyncBestHeight := m.lastSyncBestHeight
+	peerFailureCount := m.peerFailureCount
+	lastPeerFailure := m.lastPeerFailure
+	peerSuppressionCount := m.peerSuppressionCount
+	lastPeerSuppression := m.lastPeerSuppression
+	proposalFailureCount := m.proposalFailureCount
+	lastProposalFailure := m.lastProposalFailure
+	recoveryEventCount := m.recoveryEventCount
+	lastRecoveryEvent := m.lastRecoveryEvent
 	rejectedPeerMutationCount := m.rejectedPeerMutationCount
 	lastRejectedPeerMutation := m.lastRejectedPeerMutation
 	m.statusMu.RUnlock()
@@ -590,10 +721,17 @@ func (m *meshDaemon) operatorStatusSnapshot() map[string]any {
 	if lastSyncBestHeight > lastSyncLocalHeight {
 		syncLag = lastSyncBestHeight - lastSyncLocalHeight
 	}
+	runtimeState, degradedReasons, live, ready := m.runtimeStateSnapshot()
 
 	return map[string]any{
+		"daemon_state":                        runtimeState,
+		"degraded_reasons":                    degradedReasons,
+		"live":                                live,
+		"ready":                               ready,
 		"started_at":                          startedAt.Format(time.RFC3339),
+		"startup_phase":                       startupPhase,
 		"startup_ready":                       startupReady,
+		"shutdown_initiated":                  shutdownInitiated,
 		"replay_failure_count":                replayFailureCount,
 		"last_replay_error":                   lastReplayError,
 		"sync_error_count":                    syncErrorCount,
@@ -601,6 +739,14 @@ func (m *meshDaemon) operatorStatusSnapshot() map[string]any {
 		"last_sync_local_height":              lastSyncLocalHeight,
 		"last_sync_best_height":               lastSyncBestHeight,
 		"sync_lag":                            syncLag,
+		"peer_failure_count":                  peerFailureCount,
+		"last_peer_failure":                   lastPeerFailure,
+		"peer_suppression_count":              peerSuppressionCount,
+		"last_peer_suppression":               lastPeerSuppression,
+		"proposal_failure_count":              proposalFailureCount,
+		"last_proposal_failure":               lastProposalFailure,
+		"recovery_event_count":                recoveryEventCount,
+		"last_recovery_event":                 lastRecoveryEvent,
 		"reachable_peer_count":                reachable,
 		"configured_peer_count":               total,
 		"rejected_runtime_peer_mutations":     rejectedPeerMutationCount,

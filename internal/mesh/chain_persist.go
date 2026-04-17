@@ -144,6 +144,9 @@ func (c *ProductionChain) recoverInterruptedBlockWrites(dir string) error {
 		if err := syncDir(dir); err != nil {
 			return err
 		}
+		if c.daemon != nil {
+			c.daemon.recordRecoveryEvent("block_tmp_promoted", fmt.Sprintf("height=%d tmp=%s final=%s", h, tmpPath, finalPath))
+		}
 		log.Printf("[recovery] promoted interrupted block write tmp=%s final=%s height=%d", tmpPath, finalPath, h)
 	}
 	return nil
