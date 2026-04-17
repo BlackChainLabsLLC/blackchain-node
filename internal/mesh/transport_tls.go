@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -20,6 +21,9 @@ func tlsConfigFrom(t *MeshTLS, isServer bool) (*tls.Config, error) {
 	}
 	if t.CertFile == "" || t.KeyFile == "" || t.CAFile == "" {
 		return nil, fmt.Errorf("tls enabled but cert/key/ca not fully configured")
+	}
+	if err := validateTLSPaths(t); err != nil {
+		return nil, err
 	}
 
 	cert, err := tls.LoadX509KeyPair(t.CertFile, t.KeyFile)
@@ -48,6 +52,48 @@ func tlsConfigFrom(t *MeshTLS, isServer bool) (*tls.Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func validateTLSPaths(t *MeshTLS) error {
+	if t == nil {
+		return nil
+	}
+	if err := validateTLSFile("tls.cert_file", t.CertFile, false); err != nil {
+		return err
+	}
+	if err := validateTLSFile("tls.key_file", t.KeyFile, true); err != nil {
+		return err
+	}
+	if err := validateTLSFile("tls.ca_file", t.CAFile, false); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateTLSFile(field, path string, key bool) error {
+	if path == "" {
+		return fmt.Errorf("%s is empty", field)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("%s not accessible (%s): %w", field, path, err)
+	}
+	if st.IsDir() {
+		return fmt.Errorf("%s must be a file, got directory: %s", field, path)
+	}
+	if key {
+		mode := st.Mode().Perm()
+		if mode&0o077 != 0 {
+			return fmt.Errorf("%s (%s) is too permissive (%#o); expected owner-only permissions", field, path, mode)
+		}
+	}
+	clean := filepath.Clean(path)
+	f, err := os.Open(clean)
+	if err != nil {
+		return fmt.Errorf("%s not readable (%s): %w", field, path, err)
+	}
+	_ = f.Close()
+	return nil
 }
 
 func meshListen(listenAddr string, t *MeshTLS) (net.Listener, error) {

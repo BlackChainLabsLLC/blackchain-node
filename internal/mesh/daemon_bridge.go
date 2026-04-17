@@ -108,6 +108,9 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 	if dataDir == "" {
 		dataDir = filepath.Join("data", nodeName)
 	}
+	if err := validateRuntimePaths(dataDir, cfg.PersistDir); err != nil {
+		return nil, fmt.Errorf("startup path validation: %w", err)
+	}
 
 	walletPath := filepath.Join(dataDir, "wallet.json")
 
@@ -232,12 +235,6 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 	}()
 
 	/* ===================== HTTP DEBUG API ===================== */
-
-	// ===== FORCE HTTP LISTEN INVARIANT =====
-	if strings.TrimSpace(cfg.HttpListen) == "" {
-		cfg.HttpListen = ":6060"
-		log.Println("[mesh] http_listen was empty → defaulting to", cfg.HttpListen)
-	}
 
 	if cfg.HttpListen != "" {
 
