@@ -2,6 +2,7 @@ package mesh
 
 import (
 	"encoding/json"
+	"log"
 	"strings"
 	"time"
 )
@@ -51,8 +52,19 @@ func (m *meshDaemon) startSignedStateLoop() {
 		t := time.NewTicker(5 * time.Second)
 		defer t.Stop()
 		for {
+			select {
+			case <-m.runCtx.Done():
+				log.Printf("[signed_state] stopping node=%s", m.nodeID)
+				return
+			default:
+			}
 			m.gossipSignedState()
-			<-t.C
+			select {
+			case <-m.runCtx.Done():
+				log.Printf("[signed_state] stopping node=%s", m.nodeID)
+				return
+			case <-t.C:
+			}
 		}
 	}()
 }

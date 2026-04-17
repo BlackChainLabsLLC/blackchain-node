@@ -1,6 +1,9 @@
 package mesh
 
-import "time"
+import (
+	"log"
+	"time"
+)
 
 const (
 	LivenessWindow = 10 * time.Second
@@ -14,6 +17,12 @@ func (m *meshDaemon) startLivenessLoop() {
 		defer ticker.Stop()
 
 		for range ticker.C {
+			select {
+			case <-m.runCtx.Done():
+				log.Printf("[liveness] stopping node=%s", m.nodeID)
+				return
+			default:
+			}
 			now := time.Now()
 
 			m.lock.Lock()

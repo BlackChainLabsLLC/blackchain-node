@@ -26,6 +26,12 @@ func (m *meshDaemon) bootstrapSync(ctx context.Context) {
 
 	// Gate chain sync until at least one peer is reachable
 	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("[sync] bootstrap loop stopped before reachability node=%s", m.nodeID)
+			return
+		default:
+		}
 		peers := m.reachablePeers()
 		if len(peers) > 0 {
 			break
@@ -41,6 +47,12 @@ func (m *meshDaemon) bootstrapSync(ctx context.Context) {
 	}()
 
 	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("[sync] bootstrap loop stopped node=%s", m.nodeID)
+			return
+		default:
+		}
 
 		peers := m.reachablePeers()
 

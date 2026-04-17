@@ -1,14 +1,16 @@
 package mesh
 
 import (
-	"regexp"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strings"
 )
+
 func (c *ProductionChain) blockDir() string {
 	root := c.persistDir
 	if root == "" {
@@ -46,6 +48,40 @@ func (c *ProductionChain) loadFromDisk() error {
 		if os.IsNotExist(err) {
 			return nil
 		}
+		return err
+	}
+	for _, e := range ents {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".json.tmp") {
+			continue
+		}
+		base := strings.TrimSuffix(name, ".tmp")
+		if !exactBlockJSONNameRE.MatchString(base) {
+			continue
+		}
+		finalPath := filepath.Join(dir, base)
+		tmpPath := filepath.Join(dir, name)
+		if _, err := os.Stat(finalPath); err == nil {
+			_ = os.Remove(tmpPath)
+			continue
+		}
+		raw, err := os.ReadFile(tmpPath)
+		if err != nil {
+			continue
+		}
+		var b Block
+		if err := json.Unmarshal(raw, &b); err != nil {
+			log.Printf("[chain] keeping malformed tmp block file path=%s err=%v", tmpPath, err)
+			continue
+		}
+		if err := os.Rename(tmpPath, finalPath); err != nil {
+			log.Printf("[chain] tmp block recover failed src=%s dst=%s err=%v", tmpPath, finalPath, err)
+			continue
+		}
+		log.Printf("[chain] recovered interrupted block write path=%s height=%d", finalPath, b.Height)
+	}
+	ents, err = os.ReadDir(dir)
+	if err != nil {
 		return err
 	}
 

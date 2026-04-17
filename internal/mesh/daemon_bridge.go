@@ -72,14 +72,20 @@ type meshDaemon struct {
 	discoMu    sync.RWMutex
 	discoCfg   discoveryConfig
 	discoPeers map[string]discoveredPeer
+
+	runCtx    context.Context
+	cancelRun context.CancelFunc
+	stopOnce  sync.Once
 }
 
 /* ===================== START DAEMON ===================== */
 
 func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, error) {
+	runCtx, cancelRun := context.WithCancel(ctx)
 
 	cfg, err := LoadMeshConfig(opts.MeshConfigPath)
 	if err != nil {
+		cancelRun()
 		return nil, err
 	}
 
@@ -93,6 +99,7 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 
 	ln, err := meshListen(cfg.Listen, cfg.TLS)
 	if err != nil {
+		cancelRun()
 		return nil, fmt.Errorf("listen %s: %w", cfg.Listen, err)
 	}
 
@@ -113,6 +120,8 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 
 	w, err := crypto.LoadOrCreateWallet(walletPath)
 	if err != nil {
+		cancelRun()
+		_ = ln.Close()
 		return nil, err
 	}
 
@@ -167,6 +176,8 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 		seen:       make(map[string]time.Time),
 		reputation: make(map[string]*Reputation),
 		uc:         make(map[string]*UCRecord),
+		runCtx:     runCtx,
+		cancelRun:  cancelRun,
 	}
 
 	m.chain.ensureGenesisLocked()
@@ -176,10 +187,14 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 	m.chain.persistDir = m.persistDir
 
 	if _, err := m.chain.LoadSnapshotFromDisk(); err != nil {
+		cancelRun()
+		_ = ln.Close()
 		return nil, err
 	}
 
 	if err := m.chain.loadFromDisk(); err != nil {
+		cancelRun()
+		_ = ln.Close()
 		return nil, err
 	}
 
@@ -205,21 +220,26 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 		log.Println("[mesh] bootstrap peers:", m.bootstrapPeers)
 
 		go m.ConnectToPeers(m.bootstrapPeers)
-		go m.bootstrapSync(ctx)
+		go m.bootstrapSync(runCtx)
 
-		go m.discoveryPromoteLoop(ctx)
-		go m.discoveryEvictDeadLoop(ctx)
+		go m.discoveryPromoteLoop(runCtx)
+		go m.discoveryEvictDeadLoop(runCtx)
 	}
 
 	log.Println("[mesh] listening on", cfg.Listen)
 
 	go func() {
 		for {
+			select {
+			case <-runCtx.Done():
+				return
+			default:
+			}
 			conn, err := ln.Accept()
 
 			if err != nil {
 				select {
-				case <-ctx.Done():
+				case <-runCtx.Done():
 					return
 				default:
 					log.Println("[mesh] accept error:", err)
@@ -250,6 +270,8 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 
 		httpCertPath, httpKeyPath, err := ensureHTTPServerTLSFiles(dataDir, httpHost)
 		if err != nil {
+			cancelRun()
+			_ = ln.Close()
 			return nil, fmt.Errorf("http tls files: %w", err)
 		}
 
@@ -380,16 +402,20 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 /* ===================== SHUTDOWN ===================== */
 
 func (m *meshDaemon) Shutdown(ctx context.Context) error {
-
-	if m.httpSrv != nil {
-		_ = m.httpSrv.Shutdown(ctx)
-	}
-
-	if m.listener != nil {
-		return m.listener.Close()
-	}
-
-	return nil
+	var outErr error
+	m.stopOnce.Do(func() {
+		if m.cancelRun != nil {
+			m.cancelRun()
+		}
+		if m.httpSrv != nil {
+			_ = m.httpSrv.Shutdown(ctx)
+		}
+		if m.listener != nil {
+			outErr = m.listener.Close()
+		}
+		log.Printf("[mesh] shutdown completed node_id=%s", m.nodeID)
+	})
+	return outErr
 }
 
 // startPeerDialLoop periodically attempts connections to all known peers.
@@ -400,6 +426,11 @@ func (m *meshDaemon) startPeerDialLoop() {
 		defer ticker.Stop()
 
 		for range ticker.C {
+			select {
+			case <-m.runCtx.Done():
+				return
+			default:
+			}
 			m.lock.Lock()
 			peers := make([]string, 0, len(m.peers))
 			for addr := range m.peers {

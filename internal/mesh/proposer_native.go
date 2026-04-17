@@ -16,6 +16,12 @@ func (m *meshDaemon) startProposerLoop() {
 		defer ticker.Stop()
 
 		for range ticker.C {
+			select {
+			case <-m.runCtx.Done():
+				log.Printf("[proposer] stopping node=%s", m.nodeID)
+				return
+			default:
+			}
 			m.chain.mu.Lock()
 
 			before := m.chain.height

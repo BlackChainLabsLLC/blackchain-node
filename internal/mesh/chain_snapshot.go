@@ -1,7 +1,6 @@
 package mesh
 
 import (
-	"regexp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -9,8 +8,10 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 )
+
 type ChainSnapshot struct {
 	Height       int64              `json:"height"`
 	Hash         string             `json:"hash"`
@@ -83,30 +84,9 @@ func (c *ProductionChain) LoadSnapshotFromDisk() (bool, error) {
 	if err := json.Unmarshal(raw, &snap); err != nil {
 		return false, err
 	}
-
-	// Reset chain state to snapshot
-	c.height = snap.Height
-	c.tip = snap.Hash
-	c.accounts = make(map[string]*Account, len(snap.Accounts))
-	for k, v := range snap.Accounts {
-		vv := v
-		c.accounts[k] = &vv
+	if err := c.applySnapshotLocked(snap); err != nil {
+		return false, err
 	}
-	if snap.AccountsHash == "" {
-		return false, fmt.Errorf("snapshot missing accounts_hash")
-	}
-	if computeAccountsHash(c.accounts) != snap.AccountsHash {
-		return false, fmt.Errorf("snapshot accounts_hash mismatch")
-	}
-	if snap.SnapshotHash == "" {
-		return false, fmt.Errorf("snapshot missing snapshot_hash")
-	}
-	if computeSnapshotHash(snap.Height, snap.Hash, snap.AccountsHash) != snap.SnapshotHash {
-		return false, fmt.Errorf("snapshot hash mismatch")
-	}
-	c.blocks = make(map[int64]Block)
-	c.pending = make(map[int64]Block)
-	c.mempool = make([]Tx, 0, 256)
 
 	// Replay persisted blocks above snapshot height, if any exist.
 	dir := c.blockDir()
@@ -169,34 +149,47 @@ func (c *ProductionChain) LoadSnapshotFromBytes(raw []byte) (bool, error) {
 	if err := json.Unmarshal(raw, &snap); err != nil {
 		return false, err
 	}
+	if err := c.applySnapshotLocked(snap); err != nil {
+		return false, err
+	}
 
-	// Reset chain state to snapshot
+	return true, nil
+}
+
+func (c *ProductionChain) applySnapshotLocked(snap ChainSnapshot) error {
+	nextAccounts, err := validateSnapshotAccounts(snap)
+	if err != nil {
+		return err
+	}
+
 	c.height = snap.Height
 	c.tip = snap.Hash
-
-	c.accounts = make(map[string]*Account, len(snap.Accounts))
-	for k, v := range snap.Accounts {
-		vv := v
-		c.accounts[k] = &vv
-	}
-	if snap.AccountsHash == "" {
-		return false, fmt.Errorf("snapshot missing accounts_hash")
-	}
-	if computeAccountsHash(c.accounts) != snap.AccountsHash {
-		return false, fmt.Errorf("snapshot accounts_hash mismatch")
-	}
-	if snap.SnapshotHash == "" {
-		return false, fmt.Errorf("snapshot missing snapshot_hash")
-	}
-	if computeSnapshotHash(snap.Height, snap.Hash, snap.AccountsHash) != snap.SnapshotHash {
-		return false, fmt.Errorf("snapshot hash mismatch")
-	}
-
+	c.accounts = nextAccounts
 	c.blocks = make(map[int64]Block)
 	c.pending = make(map[int64]Block)
 	c.mempool = make([]Tx, 0, 256)
+	return nil
+}
 
-	return true, nil
+func validateSnapshotAccounts(snap ChainSnapshot) (map[string]*Account, error) {
+	nextAccounts := make(map[string]*Account, len(snap.Accounts))
+	for k, v := range snap.Accounts {
+		vv := v
+		nextAccounts[k] = &vv
+	}
+	if snap.AccountsHash == "" {
+		return nil, fmt.Errorf("snapshot missing accounts_hash")
+	}
+	if computeAccountsHash(nextAccounts) != snap.AccountsHash {
+		return nil, fmt.Errorf("snapshot accounts_hash mismatch")
+	}
+	if snap.SnapshotHash == "" {
+		return nil, fmt.Errorf("snapshot missing snapshot_hash")
+	}
+	if computeSnapshotHash(snap.Height, snap.Hash, snap.AccountsHash) != snap.SnapshotHash {
+		return nil, fmt.Errorf("snapshot hash mismatch")
+	}
+	return nextAccounts, nil
 }
 func computeAccountsHash(accts map[string]*Account) string {
 	type pair struct {
