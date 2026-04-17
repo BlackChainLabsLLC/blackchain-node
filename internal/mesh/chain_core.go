@@ -20,6 +20,7 @@ const (
 	BaseFee           int64 = 1
 	FeeCongestionStep       = 256
 	FeeStepIncrement  int64 = 1
+	maxProposalFutureSkew   = 2 * time.Minute
 )
 
 func (c *ProductionChain) requiredFeeLocked() int64 {
@@ -428,23 +429,36 @@ func (c *ProductionChain) applyBlockOrBufferLocked(b Block) (bool, error) {
 	}
 
 	if b.Height <= 0 {
-		return false, fmt.Errorf("bad height")
+		return false, fmt.Errorf("proposal rejected: invalid height=%d", b.Height)
 	}
 
 	if b.Height <= c.height {
-		return false, nil
+		if old, ok := c.blocks[b.Height]; ok {
+			if old.Hash == b.Hash && b.Hash != "" {
+				return false, fmt.Errorf("proposal rejected: duplicate committed proposal height=%d hash=%s", b.Height, b.Hash)
+			}
+			return false, fmt.Errorf("proposal rejected: conflicting committed proposal height=%d existing_hash=%s incoming_hash=%s", b.Height, old.Hash, b.Hash)
+		}
+		return false, fmt.Errorf("proposal rejected: stale proposal height=%d local_height=%d", b.Height, c.height)
 	}
 
 	if b.TimeUTC.IsZero() {
-		return false, fmt.Errorf("missing time")
+		return false, fmt.Errorf("proposal rejected: missing time")
+	}
+	if b.TimeUTC.After(time.Now().UTC().Add(maxProposalFutureSkew)) {
+		return false, fmt.Errorf("proposal rejected: future timestamp height=%d time=%s max_skew=%s", b.Height, b.TimeUTC.UTC().Format(time.RFC3339Nano), maxProposalFutureSkew)
+	}
+
+	if prev, ok := c.blocks[c.height]; ok && b.Height == c.height+1 && !b.TimeUTC.After(prev.TimeUTC) {
+		return false, fmt.Errorf("proposal rejected: stale timestamp height=%d prev_height=%d proposal_time=%s prev_time=%s", b.Height, prev.Height, b.TimeUTC.UTC().Format(time.RFC3339Nano), prev.TimeUTC.UTC().Format(time.RFC3339Nano))
 	}
 	if b.Hash == "" || b.Hash != c.calcBlockHash(b) {
-		return false, fmt.Errorf("bad hash")
+		return false, fmt.Errorf("proposal rejected: bad hash")
 	}
 
 	for _, tx := range b.Txs {
 		if tx.From == "" || tx.To == "" || tx.From == tx.To || tx.Amount <= 0 {
-			return false, fmt.Errorf("tx invalid")
+			return false, fmt.Errorf("proposal rejected: tx invalid")
 		}
 	}
 
@@ -458,9 +472,13 @@ func (c *ProductionChain) applyBlockOrBufferLocked(b Block) (bool, error) {
 		return true, nil
 	}
 
-	if _, ok := c.pending[b.Height]; !ok {
-		c.pending[b.Height] = b
+	if existing, ok := c.pending[b.Height]; ok {
+		if existing.Hash == b.Hash && b.Hash != "" {
+			return false, fmt.Errorf("proposal rejected: duplicate pending proposal height=%d hash=%s", b.Height, b.Hash)
+		}
+		return false, fmt.Errorf("proposal rejected: conflicting pending proposal height=%d existing_hash=%s incoming_hash=%s", b.Height, existing.Hash, b.Hash)
 	}
+	c.pending[b.Height] = b
 	return false, nil
 }
 
