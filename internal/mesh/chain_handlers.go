@@ -184,12 +184,10 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 		m.chain.mu.Lock()
 		defer m.chain.mu.Unlock()
 
-		if err := m.chain.validateTx(tx); err != nil {
+		if err := m.chain.addTxToMempoolLocked(tx); err != nil {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-
-		m.chain.mempool = append(m.chain.mempool, tx)
 
 		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 	})

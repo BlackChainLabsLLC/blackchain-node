@@ -92,7 +92,7 @@ func (c *ProductionChain) LoadSnapshotFromDisk() (bool, error) {
 	c.accounts = accounts
 	c.blocks = make(map[int64]Block)
 	c.pending = make(map[int64]Block)
-	c.mempool = make([]Tx, 0, 256)
+	c.resetMempoolLocked(MaxMempoolTxs)
 
 	// Replay persisted blocks above snapshot height, if any exist.
 	dir := c.blockDir()
@@ -174,7 +174,7 @@ func (c *ProductionChain) LoadSnapshotFromBytes(raw []byte) (bool, error) {
 
 	c.blocks = make(map[int64]Block)
 	c.pending = make(map[int64]Block)
-	c.mempool = make([]Tx, 0, 256)
+	c.resetMempoolLocked(MaxMempoolTxs)
 
 	return true, nil
 }

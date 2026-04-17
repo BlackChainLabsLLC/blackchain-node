@@ -23,6 +23,9 @@ const (
 	FeeStepIncrement          int64 = 1
 	maxProposalFutureSkew           = 2 * time.Minute
 	maxProposalBufferDistance int64 = 2
+	MaxMempoolTxs             int   = 256
+	MaxBlockTxs               int   = 64
+	maxTxFieldLen             int   = 256
 )
 
 func (c *ProductionChain) requiredFeeLocked() int64 {
@@ -131,9 +134,11 @@ type ProductionChain struct {
 	height     int64
 	tip        string
 
-	blocks   map[int64]Block
-	accounts map[string]*Account
-	mempool  []Tx
+	blocks             map[int64]Block
+	accounts           map[string]*Account
+	mempool            []Tx
+	mempoolIDs         map[string]struct{}
+	mempoolSenderNonce map[string]string
 
 	pending    map[int64]Block
 	voteCounts map[int64]int
@@ -147,13 +152,15 @@ type ProductionChain struct {
 
 func newProductionChain() *ProductionChain {
 	return &ProductionChain{
-		blocks:       make(map[int64]Block),
-		accounts:     make(map[string]*Account),
-		mempool:      make([]Tx, 0, 256),
-		pending:      make(map[int64]Block),
-		voteCounts:   make(map[int64]int),
-		votes:        make(map[int64]map[string]Vote),
-		validatorSet: make(map[string]struct{}),
+		blocks:             make(map[int64]Block),
+		accounts:           make(map[string]*Account),
+		mempool:            make([]Tx, 0, 256),
+		mempoolIDs:         make(map[string]struct{}),
+		mempoolSenderNonce: make(map[string]string),
+		pending:            make(map[int64]Block),
+		voteCounts:         make(map[int64]int),
+		votes:              make(map[int64]map[string]Vote),
+		validatorSet:       make(map[string]struct{}),
 	}
 }
 
@@ -218,6 +225,12 @@ func (c *ProductionChain) validateTx(tx Tx) error {
 	if tx.Amount <= 0 {
 		return fmt.Errorf("amount <= 0")
 	}
+	if tx.Nonce < 0 {
+		return fmt.Errorf("nonce < 0")
+	}
+	if len(tx.From) > maxTxFieldLen || len(tx.To) > maxTxFieldLen || len(tx.PubKey) > maxTxFieldLen*4 || len(tx.Signature) > maxTxFieldLen*4 {
+		return fmt.Errorf("field too large")
+	}
 	if tx.Fee < 0 {
 		return fmt.Errorf("fee < 0")
 	}
@@ -227,7 +240,7 @@ func (c *ProductionChain) validateTx(tx Tx) error {
 		return fmt.Errorf("fee too low (have %d need %d)", tx.Fee, reqFee)
 	}
 
-	from := c.getOrCreateAccount(tx.From)
+	from := c.getAccount(tx.From)
 	if from.Balance < tx.Amount+tx.Fee {
 		return fmt.Errorf("insufficient balance")
 	}
@@ -236,6 +249,126 @@ func (c *ProductionChain) validateTx(tx Tx) error {
 	}
 
 	return nil
+}
+
+func txID(tx Tx) string {
+	raw, _ := json.Marshal(tx)
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+func senderNonceKey(tx Tx) string {
+	return tx.From + ":" + fmtInt(tx.Nonce)
+}
+
+func (c *ProductionChain) resetMempoolLocked(capHint int) {
+	if capHint <= 0 {
+		capHint = MaxMempoolTxs
+	}
+	c.mempool = make([]Tx, 0, capHint)
+	c.mempoolIDs = make(map[string]struct{}, capHint)
+	c.mempoolSenderNonce = make(map[string]string, capHint)
+}
+
+func (c *ProductionChain) rebuildMempoolIndexLocked() {
+	c.mempoolIDs = make(map[string]struct{}, len(c.mempool))
+	c.mempoolSenderNonce = make(map[string]string, len(c.mempool))
+	for _, tx := range c.mempool {
+		id := txID(tx)
+		c.mempoolIDs[id] = struct{}{}
+		c.mempoolSenderNonce[senderNonceKey(tx)] = id
+	}
+}
+
+func (c *ProductionChain) addTxToMempoolLocked(tx Tx) error {
+	if err := c.validateTx(tx); err != nil {
+		return err
+	}
+	if c.mempoolIDs == nil || c.mempoolSenderNonce == nil {
+		c.rebuildMempoolIndexLocked()
+	}
+	if len(c.mempool) >= MaxMempoolTxs {
+		return fmt.Errorf("mempool full (max %d)", MaxMempoolTxs)
+	}
+	id := txID(tx)
+	if _, ok := c.mempoolIDs[id]; ok {
+		return fmt.Errorf("duplicate tx")
+	}
+	sn := senderNonceKey(tx)
+	if existing, ok := c.mempoolSenderNonce[sn]; ok && existing != id {
+		return fmt.Errorf("conflicting sender nonce already pending")
+	}
+	c.mempool = append(c.mempool, tx)
+	c.mempoolIDs[id] = struct{}{}
+	c.mempoolSenderNonce[sn] = id
+	return nil
+}
+
+func (c *ProductionChain) compactMempoolLocked() int {
+	if len(c.mempool) == 0 {
+		c.resetMempoolLocked(MaxMempoolTxs)
+		return 0
+	}
+
+	kept := make([]Tx, 0, len(c.mempool))
+	pendingIDs := make(map[string]struct{}, len(c.mempool))
+	pendingSenderNonce := make(map[string]struct{}, len(c.mempool))
+	type shadow struct {
+		balance int64
+		nonce   int64
+	}
+	shadows := make(map[string]shadow)
+	getShadow := func(addr string) shadow {
+		if s, ok := shadows[addr]; ok {
+			return s
+		}
+		ac := c.getAccount(addr)
+		s := shadow{balance: ac.Balance, nonce: ac.Nonce}
+		shadows[addr] = s
+		return s
+	}
+
+	dropped := 0
+	for _, tx := range c.mempool {
+		if err := c.validateTx(tx); err != nil {
+			dropped++
+			continue
+		}
+		id := txID(tx)
+		if _, ok := pendingIDs[id]; ok {
+			dropped++
+			continue
+		}
+		sn := senderNonceKey(tx)
+		if _, ok := pendingSenderNonce[sn]; ok {
+			dropped++
+			continue
+		}
+		from := getShadow(tx.From)
+		if tx.Nonce != from.nonce {
+			dropped++
+			continue
+		}
+		if from.balance < tx.Amount+tx.Fee {
+			dropped++
+			continue
+		}
+		from.balance -= tx.Amount + tx.Fee
+		from.nonce++
+		shadows[tx.From] = from
+		if tx.To != "" {
+			to := getShadow(tx.To)
+			to.balance += tx.Amount
+			shadows[tx.To] = to
+		}
+		kept = append(kept, tx)
+		pendingIDs[id] = struct{}{}
+		pendingSenderNonce[sn] = struct{}{}
+	}
+
+	c.mempool = kept
+	c.rebuildMempoolIndexLocked()
+	return dropped
 }
 
 func (c *ProductionChain) addVoteLocked(v Vote) error {
@@ -265,13 +398,32 @@ func (c *ProductionChain) applyBlockLocked(b Block) error {
 	if b.Reward < 0 {
 		return fmt.Errorf("negative block reward")
 	}
+	if len(b.Txs) > MaxBlockTxs {
+		return fmt.Errorf("block tx count exceeds max %d", MaxBlockTxs)
+	}
 
 	totalFees := int64(0)
+	seenTxIDs := make(map[string]struct{}, len(b.Txs))
+	seenSenderNonce := make(map[string]struct{}, len(b.Txs))
 
 	for _, tx := range b.Txs {
 		if !VerifyTxSignature(tx) {
 			return fmt.Errorf("tx invalid: bad signature")
 		}
+		if len(tx.From) > maxTxFieldLen || len(tx.To) > maxTxFieldLen || len(tx.PubKey) > maxTxFieldLen*4 || len(tx.Signature) > maxTxFieldLen*4 {
+			return fmt.Errorf("tx invalid: field too large")
+		}
+		id := txID(tx)
+		if _, ok := seenTxIDs[id]; ok {
+			return fmt.Errorf("tx invalid: duplicate tx in block")
+		}
+		seenTxIDs[id] = struct{}{}
+		sn := senderNonceKey(tx)
+		if _, ok := seenSenderNonce[sn]; ok {
+			return fmt.Errorf("tx invalid: duplicate sender nonce in block")
+		}
+		seenSenderNonce[sn] = struct{}{}
+		totalFees += tx.Fee
 	}
 
 	if b.Height != c.height+1 {
@@ -363,6 +515,9 @@ func (c *ProductionChain) applyBlockLocked(b Block) error {
 		if tx.Fee < 0 {
 			return fmt.Errorf("tx invalid: negative fee")
 		}
+		if tx.Nonce != f.nonce {
+			return fmt.Errorf("tx invalid: bad nonce sequencing")
+		}
 		if f.bal < tx.Amount+tx.Fee {
 			return fmt.Errorf("tx invalid: insufficient balance incl fee")
 		}
@@ -399,6 +554,7 @@ func (c *ProductionChain) applyBlockLocked(b Block) error {
 	c.blocks[b.Height] = b
 	c.height = b.Height
 	c.tip = b.Hash
+	c.compactMempoolLocked()
 
 	c.advanceFinalityLocked()
 	c.tip = b.Hash
@@ -746,6 +902,7 @@ func (c *ProductionChain) proposeBlock() error {
 	if err := c.proposalSafetyCheckLocked(pubHex); err != nil {
 		return err
 	}
+	c.compactMempoolLocked()
 
 	privBytes, err := hex.DecodeString(privHex)
 	if err != nil {
@@ -753,8 +910,14 @@ func (c *ProductionChain) proposeBlock() error {
 	}
 	priv := ed25519.PrivateKey(privBytes)
 
-	txs := c.mempool
-	c.mempool = nil
+	take := len(c.mempool)
+	if take > MaxBlockTxs {
+		take = MaxBlockTxs
+	}
+	txs := append([]Tx(nil), c.mempool[:take]...)
+	remainder := append([]Tx(nil), c.mempool[take:]...)
+	c.mempool = remainder
+	c.rebuildMempoolIndexLocked()
 
 	totalFees := int64(0)
 	for _, tx := range txs {
@@ -784,6 +947,12 @@ func (c *ProductionChain) proposeBlock() error {
 	SignBlock(&b, priv)
 
 	_, err = c.applyBlockOrBufferLocked(b)
+	if err != nil {
+		restore := append([]Tx{}, txs...)
+		restore = append(restore, c.mempool...)
+		c.mempool = restore
+		c.rebuildMempoolIndexLocked()
+	}
 	return err
 }
 
