@@ -34,7 +34,11 @@ type Peer struct {
 	Connected       bool      `json:"connected"`
 	Reachable       bool      `json:"reachable"`
 	FailureCount    int       `json:"failure_count,omitempty"`
+	SyncFailures    int       `json:"sync_failures,omitempty"`
 	SuppressedUntil time.Time `json:"suppressed_until,omitempty"`
+	LastSyncErr     string    `json:"last_sync_err,omitempty"`
+	LastTip         string    `json:"last_tip,omitempty"`
+	LastHeight      int64     `json:"last_height,omitempty"`
 	TrafficRecently bool      `json:"traffic_recently,omitempty"`
 	LastSeenAgeSec  int64     `json:"last_seen_age_sec,omitempty"`
 	ObservedState   string    `json:"observed_state,omitempty"`

@@ -598,8 +598,9 @@ func (m *meshDaemon) discoveryPromoteLoop(ctx context.Context) {
 			peers := m.discoverySnapshot()
 
 			for _, p := range peers {
-				addr := p.Addr
-				if addr == "" {
+				addr, err := sanitizeLearnedPeerAddr(p.Addr, m.id, m.peers)
+				if err != nil {
+					log.Printf("[discovery] rejected learned peer addr=%q reason=%v", p.Addr, err)
 					continue
 				}
 
