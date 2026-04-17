@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -123,6 +124,11 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 		return nil, err
 	}
 
+	bootstrapPeers, err := loadBootstrapPeersFromFile(defaultBootstrapConfigPath, candidateSelfAddresses(cfg))
+	if err != nil {
+		return nil, err
+	}
+
 	// ===== CONFIG SNAPSHOT (SOURCE OF TRUTH) =====
 	log.Println("[mesh] ===== CONFIG SNAPSHOT =====")
 	log.Println("[mesh] node_id =", cfg.NodeID)
@@ -147,29 +153,17 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 
 	/* ===================== BOOTSTRAP PEERS ===================== */
 
-	bootstrapPeers := LoadBootstrapPeers()
-
 	// merge config peers + bootstrap peers
-	peerSet := map[string]struct{}{}
-
-	for _, p := range cfg.Peers {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			peerSet[p] = struct{}{}
-		}
-	}
-
-	for _, p := range bootstrapPeers {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			peerSet[p] = struct{}{}
-		}
+	peerSet, err := buildStartupPeerSet(cfg.Peers, bootstrapPeers)
+	if err != nil {
+		return nil, err
 	}
 
 	finalPeers := make([]string, 0, len(peerSet))
 	for p := range peerSet {
 		finalPeers = append(finalPeers, p)
 	}
+	sort.Strings(finalPeers)
 
 	/* ===================== INITIAL PEER MAP ===================== */
 
@@ -476,6 +470,24 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 	}
 
 	return m, nil
+}
+
+func buildStartupPeerSet(configPeers, bootstrapPeers []string) (map[string]struct{}, error) {
+	peerSet := make(map[string]struct{}, len(configPeers)+len(bootstrapPeers))
+	for _, src := range [][]string{configPeers, bootstrapPeers} {
+		for _, p := range src {
+			p = strings.TrimSpace(p)
+			if p == "" {
+				continue
+			}
+			addr, err := validateTCPAddress("startup peer", p)
+			if err != nil {
+				return nil, err
+			}
+			peerSet[addr] = struct{}{}
+		}
+	}
+	return peerSet, nil
 }
 
 /* ===================== SHUTDOWN ===================== */
