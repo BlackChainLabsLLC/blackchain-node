@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"sort"
 	"strconv"
@@ -23,14 +24,21 @@ BOOTSTRAP SYNC
 */
 
 func (m *meshDaemon) bootstrapSync(ctx context.Context) {
+	const (
+		minRetryDelay        = 300 * time.Millisecond
+		maxRetryDelay        = 5 * time.Second
+		maxSyncBackoff       = 30 * time.Second
+		rangeChunk     int64 = 50
+	)
+	retryDelay := minRetryDelay
 
 	// Gate chain sync until at least one peer is reachable
 	for {
-		peers := m.reachablePeers()
+		peers := m.reachablePeersForSync()
 		if len(peers) > 0 {
 			break
 		}
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(minRetryDelay)
 	}
 
 	log.Println("[sync] reachable peers detected, starting sync")
@@ -41,11 +49,17 @@ func (m *meshDaemon) bootstrapSync(ctx context.Context) {
 	}()
 
 	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
 
-		peers := m.reachablePeers()
+		peers := m.reachablePeersForSync()
 
 		if len(peers) == 0 {
-			time.Sleep(300 * time.Millisecond)
+			time.Sleep(retryDelay)
+			retryDelay = nextRetryDelay(retryDelay, maxRetryDelay)
 			continue
 		}
 
@@ -59,17 +73,22 @@ func (m *meshDaemon) bootstrapSync(ctx context.Context) {
 
 		var cands []cand
 
-		for _, addr := range m.reachablePeers() {
+		for _, addr := range peers {
 			h, tip, err := m.requestPeerHeight(addr)
 			if err != nil {
 				log.Printf("[sync] height err %s: %v", addr, err)
+				m.noteSyncFailure(addr, "probe-height", maxSyncBackoff, err)
+				continue
+			}
+			if !m.notePeerHeightSample(addr, h, tip, maxSyncBackoff) {
 				continue
 			}
 			cands = append(cands, cand{addr, h, tip})
 		}
 
 		if len(cands) == 0 {
-			time.Sleep(300 * time.Millisecond)
+			time.Sleep(retryDelay)
+			retryDelay = nextRetryDelay(retryDelay, maxRetryDelay)
 			continue
 		}
 
@@ -84,35 +103,56 @@ func (m *meshDaemon) bootstrapSync(ctx context.Context) {
 		m.chain.mu.RUnlock()
 
 		if best.Height <= localH {
+			m.noteSyncSuccess(best.Addr)
 			log.Printf("[sync] up-to-date local=%d best=%d", localH, best.Height)
 			time.Sleep(1 * time.Second)
+			retryDelay = minRetryDelay
 			continue
 		}
 
 		log.Printf("[sync] behind local=%d best=%d @ %s", localH, best.Height, best.Addr)
 
-		const chunk int64 = 50
+		syncErr := false
 
-		for cur := localH + 1; cur <= best.Height; cur += chunk {
+		for cur := localH + 1; cur <= best.Height; cur += rangeChunk {
 
-			end := cur + chunk - 1
+			end := cur + rangeChunk - 1
 			if end > best.Height {
 				end = best.Height
 			}
 
 			blocks, err := m.requestPeerRange(best.Addr, cur, end)
 			if err != nil {
-				log.Printf("[sync] range err %v", err)
-				time.Sleep(750 * time.Millisecond)
-				continue
+				log.Printf("[sync] range err peer=%s from=%d to=%d: %v", best.Addr, cur, end, err)
+				m.noteSyncFailure(best.Addr, "fetch-range", maxSyncBackoff, err)
+				syncErr = true
+				break
+			}
+			if len(blocks) == 0 {
+				m.noteSyncFailure(best.Addr, "empty-range", maxSyncBackoff, fmt.Errorf("peer returned no blocks"))
+				syncErr = true
+				break
 			}
 
 			m.chain.mu.Lock()
 			for _, b := range blocks {
-				_, _ = m.chain.applyBlockOrBufferLocked(b)
+				if _, err := m.chain.applyBlockOrBufferLocked(b); err != nil {
+					m.chain.mu.Unlock()
+					m.noteSyncFailure(best.Addr, "apply-block", maxSyncBackoff, err)
+					syncErr = true
+					break
+				}
+			}
+			if syncErr {
+				break
 			}
 			_ = m.chain.drainPendingLocked()
 			m.chain.mu.Unlock()
+		}
+		if syncErr {
+			time.Sleep(retryDelay)
+			retryDelay = nextRetryDelay(retryDelay, maxRetryDelay)
+			continue
 		}
 
 		m.chain.mu.RLock()
@@ -120,11 +160,107 @@ func (m *meshDaemon) bootstrapSync(ctx context.Context) {
 		t := m.chain.tip
 		m.chain.mu.RUnlock()
 
+		m.noteSyncSuccess(best.Addr)
 		log.Printf("[sync] done height=%d tip=%s", h, t)
 		// NOTE: do not return; keep syncing for future blocks
 		time.Sleep(750 * time.Millisecond)
+		retryDelay = minRetryDelay
 		continue
 	}
+}
+
+func nextRetryDelay(cur, max time.Duration) time.Duration {
+	if cur <= 0 {
+		return 300 * time.Millisecond
+	}
+	next := time.Duration(math.Min(float64(max), float64(cur*2)))
+	if next < 300*time.Millisecond {
+		return 300 * time.Millisecond
+	}
+	return next
+}
+
+func (m *meshDaemon) notePeerHeightSample(addr string, h int64, tip string, maxBackoff time.Duration) bool {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
+	p, ok := m.peers[addr]
+	if !ok {
+		return false
+	}
+	tip = strings.TrimSpace(tip)
+	if h <= 0 || tip == "" {
+		p.ObservedState = "sync_probe_invalid"
+		p.SyncFailures++
+		p.LastSyncErr = "invalid advertised height/tip"
+		p.SuppressedUntil = time.Now().Add(backoffForFailures(p.SyncFailures, maxBackoff))
+		return false
+	}
+
+	// Inconsistent reporting: tip changed without advancing height.
+	if p.LastHeight > 0 && h == p.LastHeight && p.LastTip != "" && p.LastTip != tip {
+		p.ObservedState = "sync_probe_inconsistent"
+		p.SyncFailures++
+		p.LastSyncErr = "tip changed at same height"
+		p.SuppressedUntil = time.Now().Add(backoffForFailures(p.SyncFailures, maxBackoff))
+		return false
+	}
+
+	// Stale backwards reporting beyond minor jitter.
+	if p.LastHeight > 0 && h+1 < p.LastHeight {
+		p.ObservedState = "sync_probe_stale"
+		p.SyncFailures++
+		p.LastSyncErr = fmt.Sprintf("height regressed from %d to %d", p.LastHeight, h)
+		p.SuppressedUntil = time.Now().Add(backoffForFailures(p.SyncFailures, maxBackoff))
+		return false
+	}
+
+	p.LastHeight = h
+	p.LastTip = tip
+	return true
+}
+
+func (m *meshDaemon) noteSyncFailure(addr, state string, maxBackoff time.Duration, err error) {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
+	p, ok := m.peers[addr]
+	if !ok {
+		return
+	}
+	p.SyncFailures++
+	p.ObservedState = state
+	if err != nil {
+		p.LastSyncErr = err.Error()
+	}
+	p.SuppressedUntil = time.Now().Add(backoffForFailures(p.SyncFailures, maxBackoff))
+}
+
+func (m *meshDaemon) noteSyncSuccess(addr string) {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+	p, ok := m.peers[addr]
+	if !ok {
+		return
+	}
+	p.SyncFailures = 0
+	p.LastSyncErr = ""
+	p.SuppressedUntil = time.Time{}
+	if p.ObservedState == "" || strings.HasPrefix(p.ObservedState, "sync_") {
+		p.ObservedState = "sync_ok"
+	}
+}
+
+func backoffForFailures(failures int, max time.Duration) time.Duration {
+	if failures <= 0 {
+		return 0
+	}
+	sec := math.Pow(2, float64(failures-1))
+	wait := time.Duration(sec) * time.Second
+	if wait > max {
+		return max
+	}
+	return wait
 }
 
 func (m *meshDaemon) requestPeerHeight(addr string) (int64, string, error) {
@@ -240,6 +376,25 @@ func (m *meshDaemon) reachablePeers() []string {
 		}
 	}
 
+	sort.Strings(peers)
+	return peers
+}
+
+func (m *meshDaemon) reachablePeersForSync() []string {
+	now := time.Now()
+	m.lock.RLock()
+	defer m.lock.RUnlock()
+
+	peers := make([]string, 0, len(m.peers))
+	for addr, p := range m.peers {
+		if !p.Reachable {
+			continue
+		}
+		if !p.SuppressedUntil.IsZero() && p.SuppressedUntil.After(now) {
+			continue
+		}
+		peers = append(peers, addr)
+	}
 	sort.Strings(peers)
 	return peers
 }

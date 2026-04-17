@@ -1,7 +1,9 @@
 package mesh
 
 import (
+	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -36,6 +38,18 @@ func splitHostPortLoose(addr string) (host string, port string, ok bool) {
 	return normalizeHost(h), strings.TrimSpace(p), true
 }
 
+func sanitizeLearnedPeerAddr(addr string) (string, error) {
+	host, port, ok := splitHostPortLoose(addr)
+	if !ok || host == "" || port == "" {
+		return "", fmt.Errorf("invalid host:port")
+	}
+	p, err := strconv.Atoi(port)
+	if err != nil || p <= 0 || p > 65535 {
+		return "", fmt.Errorf("invalid port")
+	}
+	return net.JoinHostPort(host, port), nil
+}
+
 func equivalentPeerAddr(a, b string) bool {
 	ha, pa, oka := splitHostPortLoose(a)
 	hb, pb, okb := splitHostPortLoose(b)
@@ -53,13 +67,26 @@ func equivalentPeerAddr(a, b string) bool {
 
 // TouchPeer = real traffic observed.
 func (m *meshDaemon) TouchPeer(addr string) {
-	addr = strings.TrimSpace(addr)
-	if addr == "" {
+	clean, err := sanitizeLearnedPeerAddr(addr)
+	if err != nil {
 		return
 	}
 
 	m.lock.Lock()
 	defer m.lock.Unlock()
+
+	if clean == m.id {
+		return
+	}
+
+	// Deduplicate to existing equivalent entry if present.
+	addr = clean
+	for known := range m.peers {
+		if equivalentPeerAddr(known, clean) {
+			addr = known
+			break
+		}
+	}
 
 	p, ok := m.peers[addr]
 	if !ok {
