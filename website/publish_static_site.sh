@@ -15,13 +15,14 @@ cp "${ROOT_DIR}/index.html" "${TARGET_DIR}/index.html"
 cp "${ROOT_DIR}/styles.css" "${TARGET_DIR}/styles.css"
 cp "${ROOT_DIR}/app.js" "${TARGET_DIR}/app.js"
 
-for route in pricing host-site operator territory; do
+for route in pricing host-site operator territory founder; do
   mkdir -p "${TARGET_DIR}/${route}"
   cp "${ROOT_DIR}/${route}/index.html" "${TARGET_DIR}/${route}/index.html"
 done
 
 mkdir -p "${TARGET_DIR}/territory/thanks"
 cp "${ROOT_DIR}/territory/thanks/index.html" "${TARGET_DIR}/territory/thanks/index.html"
+cp -R "${ROOT_DIR}/docs" "${TARGET_DIR}/docs"
 
 cat > "${TARGET_DIR}/PUBLISH_INFO.txt" <<EOF
 BlackChain static website publish staging

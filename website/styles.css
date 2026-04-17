@@ -163,6 +163,10 @@ button {
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
 
+.grid-4 {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
 .section-stack {
   display: grid;
   gap: 1.5rem;
@@ -278,6 +282,25 @@ legend {
 
 .site-footer p {
   margin: 0;
+}
+
+.compact-list {
+  margin: 0;
+  padding-left: 1.2rem;
+}
+
+.compact-list li + li {
+  margin-top: 0.45rem;
+}
+
+.link-list {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.link-list a {
+  text-decoration: none;
+  color: var(--accent-strong);
 }
 
 @media (max-width: 720px) {

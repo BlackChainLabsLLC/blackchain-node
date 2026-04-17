@@ -8,6 +8,7 @@
   - `/operator/`
   - `/territory/`
   - `/territory/thanks/`
+  - `/founder/`
 - keep CTA targets and form field names aligned to the production docs before publishing
 - local preview:
   - `python3 -m http.server 8123 --directory website`
@@ -39,3 +40,4 @@
 - [FOUNDER_REVIEW_RHYTHM_GUIDE.md](/mnt/blacknet/projects/blackchain/website/docs/FOUNDER_REVIEW_RHYTHM_GUIDE.md)
 - [FOUNDER_DECISION_QUEUE_TEMPLATE.md](/mnt/blacknet/projects/blackchain/website/docs/FOUNDER_DECISION_QUEUE_TEMPLATE.md)
 - [FOUNDER_FIRST_LOOK_EVERY_DAY.md](/mnt/blacknet/projects/blackchain/website/docs/FOUNDER_FIRST_LOOK_EVERY_DAY.md)
+- [Founder Command Center](/mnt/blacknet/projects/blackchain/website/founder/index.html)
