@@ -82,6 +82,9 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 	if err != nil {
 		return nil, err
 	}
+	if err := validateStartupConfig(cfg); err != nil {
+		return nil, err
+	}
 
 	// ===== CONFIG SNAPSHOT (SOURCE OF TRUTH) =====
 	log.Println("[mesh] ===== CONFIG SNAPSHOT =====")
@@ -118,7 +121,14 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 
 	/* ===================== BOOTSTRAP PEERS ===================== */
 
-	bootstrapPeers := LoadBootstrapPeers()
+	rawBootstrapPeers, err := loadBootstrapPeersFromFile("config/bootstrap.json")
+	if err != nil {
+		return nil, err
+	}
+	bootstrapPeers, err := normalizeBootstrapPeers(rawBootstrapPeers, cfg.Listen)
+	if err != nil {
+		return nil, err
+	}
 
 	// merge config peers + bootstrap peers
 	peerSet := map[string]struct{}{}

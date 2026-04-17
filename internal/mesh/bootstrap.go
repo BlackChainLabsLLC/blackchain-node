@@ -2,6 +2,7 @@ package mesh
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 )
 
@@ -10,20 +11,25 @@ type bootstrapConfig struct {
 }
 
 func LoadBootstrapPeers() []string {
-
-	file := "config/bootstrap.json"
-
-	data, err := os.ReadFile(file)
+	peers, err := loadBootstrapPeersFromFile("config/bootstrap.json")
 	if err != nil {
 		return []string{}
+	}
+	return peers
+}
+
+func loadBootstrapPeersFromFile(file string) ([]string, error) {
+	data, err := os.ReadFile(file)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []string{}, nil
+		}
+		return nil, fmt.Errorf("read bootstrap config: %w", err)
 	}
 
 	var cfg bootstrapConfig
-
-	err = json.Unmarshal(data, &cfg)
-	if err != nil {
-		return []string{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parse bootstrap config: %w", err)
 	}
-
-	return cfg.BootstrapPeers
+	return cfg.BootstrapPeers, nil
 }
