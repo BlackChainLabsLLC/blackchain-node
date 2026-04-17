@@ -51,8 +51,12 @@ func (m *meshDaemon) startSignedStateLoop() {
 		t := time.NewTicker(5 * time.Second)
 		defer t.Stop()
 		for {
-			m.gossipSignedState()
-			<-t.C
+			select {
+			case <-m.runCtx.Done():
+				return
+			case <-t.C:
+				m.gossipSignedState()
+			}
 		}
 	}()
 }

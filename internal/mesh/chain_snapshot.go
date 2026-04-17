@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 )
 
@@ -67,7 +66,9 @@ func (c *ProductionChain) SaveSnapshotLocked() error {
 // LoadSnapshotFromDisk attempts to load snapshot.json and apply it as chain base.
 // This resets in-memory state to snapshot, then replays any persisted blocks ABOVE snapshot height.
 func (c *ProductionChain) LoadSnapshotFromDisk() (bool, error) {
-	exactBlockJSONNameRE := regexp.MustCompile(`^[0-9]+\.json$`)
+	if err := c.recoverInterruptedSnapshotWrite(); err != nil {
+		return false, err
+	}
 	path := c.snapshotPath()
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -150,6 +151,41 @@ func (c *ProductionChain) LoadSnapshotFromDisk() (bool, error) {
 	}
 
 	return true, nil
+}
+
+func (c *ProductionChain) recoverInterruptedSnapshotWrite() error {
+	path := c.snapshotPath()
+	tmpPath := path + ".tmp"
+	if _, err := os.Stat(tmpPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if _, err := os.Stat(path); err == nil {
+		_ = os.Remove(tmpPath)
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	raw, err := os.ReadFile(tmpPath)
+	if err != nil {
+		return err
+	}
+	var snap ChainSnapshot
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		return handleReplayCorruption("interrupted snapshot write recovery", tmpPath, fmt.Errorf("decode tmp snapshot: %w", err), false)
+	}
+	if _, err := validateSnapshotPayload(raw, snap); err != nil {
+		return handleReplayCorruption("interrupted snapshot write recovery", tmpPath, err, false)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("recover tmp snapshot %s: %w", tmpPath, err)
+	}
+	if err := syncDir(filepath.Dir(path)); err != nil {
+		return err
+	}
+	return nil
 }
 
 // LoadSnapshotFromBytes applies a snapshot payload received over the mesh.

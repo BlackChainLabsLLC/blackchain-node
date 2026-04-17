@@ -63,6 +63,10 @@ type meshDaemon struct {
 	peers                    map[string]*Peer
 	lock                     sync.RWMutex
 	httpSrv                  *http.Server
+	runCtx                   context.Context
+	runCancel                context.CancelFunc
+	shutdownOnce             sync.Once
+	shutdownErr              error
 
 	id     string
 	nodeID string
@@ -200,6 +204,7 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 		uc:         make(map[string]*UCRecord),
 		startedAt:  time.Now().UTC(),
 	}
+	m.runCtx, m.runCancel = context.WithCancel(ctx)
 
 	m.chain.ensureGenesisLocked()
 	m.chain.daemon = m
@@ -251,10 +256,10 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 		log.Println("[mesh] bootstrap peers:", m.bootstrapPeers)
 
 		go m.ConnectToPeers(m.bootstrapPeers)
-		go m.bootstrapSync(ctx)
+		go m.bootstrapSync(m.runCtx)
 
-		go m.discoveryPromoteLoop(ctx)
-		go m.discoveryEvictDeadLoop(ctx)
+		go m.discoveryPromoteLoop(m.runCtx)
+		go m.discoveryEvictDeadLoop(m.runCtx)
 	}
 
 	log.Println("[mesh] listening on", cfg.Listen)
@@ -496,16 +501,24 @@ func buildStartupPeerSet(configPeers, bootstrapPeers []string) (map[string]struc
 /* ===================== SHUTDOWN ===================== */
 
 func (m *meshDaemon) Shutdown(ctx context.Context) error {
-
-	if m.httpSrv != nil {
-		_ = m.httpSrv.Shutdown(ctx)
-	}
-
-	if m.listener != nil {
-		return m.listener.Close()
-	}
-
-	return nil
+	m.shutdownOnce.Do(func() {
+		if m.runCancel != nil {
+			m.runCancel()
+		}
+		if m.httpSrv != nil {
+			if err := m.httpSrv.Shutdown(ctx); err != nil && err != http.ErrServerClosed {
+				m.shutdownErr = err
+				return
+			}
+		}
+		if m.listener != nil {
+			if err := m.listener.Close(); err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
+				m.shutdownErr = err
+				return
+			}
+		}
+	})
+	return m.shutdownErr
 }
 
 func (m *meshDaemon) markStartupReady() {

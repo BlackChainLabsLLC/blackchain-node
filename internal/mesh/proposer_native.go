@@ -19,7 +19,12 @@ func (m *meshDaemon) startProposerLoop() {
 		ticker := time.NewTicker(3 * time.Second)
 		defer ticker.Stop()
 
-		for range ticker.C {
+		for {
+			select {
+			case <-m.runCtx.Done():
+				return
+			case <-ticker.C:
+			}
 			m.chain.mu.Lock()
 			if err := m.proposerReadyLocked(); err != nil {
 				log.Printf("[proposer] validator action not ready: %v", err)

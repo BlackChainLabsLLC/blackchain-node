@@ -13,7 +13,12 @@ func (m *meshDaemon) startLivenessLoop() {
 		ticker := time.NewTicker(LivenessTick)
 		defer ticker.Stop()
 
-		for range ticker.C {
+		for {
+			select {
+			case <-m.runCtx.Done():
+				return
+			case <-ticker.C:
+			}
 			now := time.Now()
 
 			m.lock.Lock()

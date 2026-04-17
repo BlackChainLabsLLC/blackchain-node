@@ -14,6 +14,9 @@ import (
 	"time"
 )
 
+var exactBlockJSONNameRE = regexp.MustCompile(`^[0-9]+\.json$`)
+var exactBlockJSONTmpNameRE = regexp.MustCompile(`^([0-9]+)\.json\.tmp$`)
+
 func (c *ProductionChain) blockDir() string {
 	root := c.persistDir
 	if root == "" {
@@ -41,8 +44,10 @@ func (c *ProductionChain) persistBlockLocked(b Block) error {
 }
 
 func (c *ProductionChain) loadFromDisk() error {
-	exactBlockJSONNameRE := regexp.MustCompile(`^[0-9]+\.json$`)
 	dir := c.blockDir()
+	if err := c.recoverInterruptedBlockWrites(dir); err != nil {
+		return err
+	}
 	ents, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -97,6 +102,50 @@ func (c *ProductionChain) loadFromDisk() error {
 		}
 	}
 
+	return nil
+}
+
+func (c *ProductionChain) recoverInterruptedBlockWrites(dir string) error {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, e := range ents {
+		match := exactBlockJSONTmpNameRE.FindStringSubmatch(e.Name())
+		if len(match) != 2 {
+			continue
+		}
+		var h int64
+		if _, err := fmt.Sscanf(match[1], "%d", &h); err != nil {
+			continue
+		}
+		tmpPath := filepath.Join(dir, e.Name())
+		finalPath := filepath.Join(dir, fmt.Sprintf("%d.json", h))
+		if _, err := os.Stat(finalPath); err == nil {
+			_ = os.Remove(tmpPath)
+			continue
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		raw, err := os.ReadFile(tmpPath)
+		if err != nil {
+			return err
+		}
+		var b Block
+		if err := decodePersistedBlock(raw, h, &b); err != nil {
+			return handleReplayCorruption("interrupted block write recovery", tmpPath, fmt.Errorf("decode tmp height %d: %w", h, err), false)
+		}
+		if err := os.Rename(tmpPath, finalPath); err != nil {
+			return fmt.Errorf("recover tmp block %s: %w", tmpPath, err)
+		}
+		if err := syncDir(dir); err != nil {
+			return err
+		}
+		log.Printf("[recovery] promoted interrupted block write tmp=%s final=%s height=%d", tmpPath, finalPath, h)
+	}
 	return nil
 }
 
