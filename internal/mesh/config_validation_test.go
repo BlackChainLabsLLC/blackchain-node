@@ -31,6 +31,23 @@ func TestLoadMeshConfigRejectsListenAndHostPortTogether(t *testing.T) {
 	}
 }
 
+func TestLoadMeshConfigAllowsListenWithLegacyPortOnly(t *testing.T) {
+	path := writeMeshConfigForTest(t, `{
+		"node_id":"node1",
+		"listen":"127.0.0.1:7072",
+		"port":7072,
+		"http_listen":"127.0.0.1:6060"
+	}`)
+
+	cfg, err := LoadMeshConfig(path)
+	if err != nil {
+		t.Fatalf("expected legacy port-only config to load, got %v", err)
+	}
+	if cfg.Listen != "127.0.0.1:7072" {
+		t.Fatalf("expected listen to remain authoritative, got %q", cfg.Listen)
+	}
+}
+
 func TestLoadMeshConfigRejectsLegacyDebugField(t *testing.T) {
 	path := writeMeshConfigForTest(t, `{
 		"node_id":"node1",

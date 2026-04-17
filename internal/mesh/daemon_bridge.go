@@ -115,6 +115,13 @@ type meshDaemon struct {
 /* ===================== START DAEMON ===================== */
 
 func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, error) {
+	var m *meshDaemon
+	started := false
+	defer func() {
+		if !started && m != nil {
+			_ = m.Shutdown(context.Background())
+		}
+	}()
 
 	cfg, err := LoadMeshConfig(opts.MeshConfigPath)
 	if err != nil {
@@ -192,7 +199,7 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 
 	/* ===================== DAEMON INIT ===================== */
 
-	m := &meshDaemon{
+	m = &meshDaemon{
 		tlsCfg:                   cfg.TLS,
 		chain:                    newProductionChain(),
 		dataDir:                  dataDir,
@@ -223,6 +230,10 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 
 	m.chain.dataDir = m.dataDir
 	m.chain.persistDir = m.persistDir
+
+	if err := m.startHTTPServer(cfg); err != nil {
+		return nil, err
+	}
 
 	snapshotLoaded, err := m.chain.LoadSnapshotFromDisk()
 	if err != nil {
@@ -297,202 +308,200 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 		}
 	}()
 
-	/* ===================== HTTP DEBUG API ===================== */
+	started = true
+	return m, nil
+}
 
-	// ===== FORCE HTTP LISTEN INVARIANT =====
+func (m *meshDaemon) startHTTPServer(cfg *MeshConfig) error {
 	if strings.TrimSpace(cfg.HttpListen) == "" {
 		cfg.HttpListen = ":6060"
 		log.Println("[mesh] http_listen was empty → defaulting to", cfg.HttpListen)
 	}
+	if cfg.HttpListen == "" {
+		return nil
+	}
 
-	if cfg.HttpListen != "" {
-		httpCertPath, httpKeyPath, err := ensureHTTPServerTLSFiles(dataDir, httpHostForListen(cfg.HttpListen, cfg.Host), cfg.TLS)
-		if err != nil {
-			return nil, fmt.Errorf("http tls files: %w", err)
-		}
+	httpCertPath, httpKeyPath, err := ensureHTTPServerTLSFiles(m.dataDir, httpHostForListen(cfg.HttpListen, cfg.Host), cfg.TLS)
+	if err != nil {
+		return fmt.Errorf("http tls files: %w", err)
+	}
 
-		mux := http.NewServeMux()
+	mux := http.NewServeMux()
+	m.registerChainHandlers(mux)
 
-		m.registerChainHandlers(mux)
+	m.httpSrv = &http.Server{
+		Addr:              cfg.HttpListen,
+		Handler:           buildHTTPMiddleware(cfg)(mux),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       30 * time.Second,
+		MaxHeaderBytes:    8 << 10,
+		TLSConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
+	}
+	httpLn, err := net.Listen("tcp", cfg.HttpListen)
+	if err != nil {
+		return fmt.Errorf("http listen %s: %w", cfg.HttpListen, err)
+	}
 
-		m.httpSrv = &http.Server{
-			Addr:              cfg.HttpListen,
-			Handler:           buildHTTPMiddleware(cfg)(mux),
-			ReadHeaderTimeout: 5 * time.Second,
-			ReadTimeout:       15 * time.Second,
-			WriteTimeout:      15 * time.Second,
-			IdleTimeout:       30 * time.Second,
-			MaxHeaderBytes:    8 << 10,
-			TLSConfig: &tls.Config{
-				MinVersion: tls.VersionTLS12,
-			},
-		}
+	mux.HandleFunc("/peers", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			if !m.adminEndpointsEnabled {
+				log.Printf("[peers] rejected runtime mutation from=%s reason=admin_surface_disabled", r.RemoteAddr)
+				m.recordRejectedPeerMutation("admin_surface_disabled")
+				writeJSON(w, http.StatusForbidden, map[string]any{
+					"ok":    false,
+					"error": "admin endpoints disabled on this node",
+				})
+				return
+			}
+			if !m.allowRuntimePeerMutation {
+				m.recordRejectedPeerMutation("disabled")
+				log.Printf("[peers] rejected runtime mutation from=%s reason=disabled", r.RemoteAddr)
+				writeJSON(w, http.StatusForbidden, map[string]any{
+					"ok":    false,
+					"error": "runtime peer mutation disabled; set allow_runtime_peer_mutation=true for explicit opt-in",
+				})
+				return
+			}
 
-		mux.HandleFunc("/peers", func(w http.ResponseWriter, r *http.Request) {
-			if r.Method == http.MethodPost {
-				if !m.adminEndpointsEnabled {
-					log.Printf("[peers] rejected runtime mutation from=%s reason=admin_surface_disabled", r.RemoteAddr)
-					m.recordRejectedPeerMutation("admin_surface_disabled")
-					writeJSON(w, http.StatusForbidden, map[string]any{
-						"ok":    false,
-						"error": "admin endpoints disabled on this node",
-					})
-					return
-				}
-				if !m.allowRuntimePeerMutation {
-					m.recordRejectedPeerMutation("disabled")
-					log.Printf("[peers] rejected runtime mutation from=%s reason=disabled", r.RemoteAddr)
-					writeJSON(w, http.StatusForbidden, map[string]any{
-						"ok":    false,
-						"error": "runtime peer mutation disabled; set allow_runtime_peer_mutation=true for explicit opt-in",
-					})
-					return
-				}
+			var req struct {
+				Addr string `json:"addr"`
+			}
 
-				var req struct {
-					Addr string `json:"addr"`
-				}
+			if err := decodeJSONBody(w, r, maxJSONBodyBytes, &req); err != nil {
+				m.recordRejectedPeerMutation("bad_json")
+				log.Printf("[peers] rejected runtime mutation from=%s reason=bad_json err=%v", r.RemoteAddr, err)
+				writeAPIError(r, w, http.StatusBadRequest, "invalid_json", err.Error())
+				return
+			}
 
-				if err := decodeJSONBody(w, r, maxJSONBodyBytes, &req); err != nil {
-					m.recordRejectedPeerMutation("bad_json")
-					log.Printf("[peers] rejected runtime mutation from=%s reason=bad_json err=%v", r.RemoteAddr, err)
-					writeAPIError(r, w, http.StatusBadRequest, "invalid_json", err.Error())
-					return
-				}
+			addr := strings.TrimSpace(req.Addr)
+			if addr == "" {
+				m.recordRejectedPeerMutation("empty_addr")
+				log.Printf("[peers] rejected runtime mutation from=%s reason=empty_addr", r.RemoteAddr)
+				writeAPIError(r, w, http.StatusBadRequest, "missing_addr", "missing addr")
+				return
+			}
+			normalized, err := validateTCPAddress("peer", addr)
+			if err != nil {
+				m.recordRejectedPeerMutation("invalid_addr")
+				log.Printf("[peers] rejected runtime mutation from=%s reason=invalid_addr addr=%q err=%v", r.RemoteAddr, addr, err)
+				writeAPIError(r, w, http.StatusBadRequest, "invalid_addr", err.Error())
+				return
+			}
+			if normalized == m.id {
+				m.recordRejectedPeerMutation("self")
+				log.Printf("[peers] rejected runtime mutation from=%s reason=self addr=%s", r.RemoteAddr, normalized)
+				writeAPIError(r, w, http.StatusBadRequest, "self_peer", "peer mutation rejected: self address not allowed")
+				return
+			}
 
-				addr := strings.TrimSpace(req.Addr)
-				if addr == "" {
-					m.recordRejectedPeerMutation("empty_addr")
-					log.Printf("[peers] rejected runtime mutation from=%s reason=empty_addr", r.RemoteAddr)
-					writeAPIError(r, w, http.StatusBadRequest, "missing_addr", "missing addr")
-					return
+			m.lock.Lock()
+			_, existsPeer := m.peers[normalized]
+			existsBootstrap := false
+			for _, bp := range m.bootstrapPeers {
+				if bp == normalized {
+					existsBootstrap = true
+					break
 				}
-				normalized, err := validateTCPAddress("peer", addr)
-				if err != nil {
-					m.recordRejectedPeerMutation("invalid_addr")
-					log.Printf("[peers] rejected runtime mutation from=%s reason=invalid_addr addr=%q err=%v", r.RemoteAddr, addr, err)
-					writeAPIError(r, w, http.StatusBadRequest, "invalid_addr", err.Error())
-					return
-				}
-				if normalized == m.id {
-					m.recordRejectedPeerMutation("self")
-					log.Printf("[peers] rejected runtime mutation from=%s reason=self addr=%s", r.RemoteAddr, normalized)
-					writeAPIError(r, w, http.StatusBadRequest, "self_peer", "peer mutation rejected: self address not allowed")
-					return
-				}
+			}
+			if !existsPeer {
+				m.TouchReachable(normalized, true)
+			}
+			if !existsBootstrap {
+				m.bootstrapPeers = append(m.bootstrapPeers, normalized)
+			}
+			m.lock.Unlock()
 
-				m.lock.Lock()
-				_, existsPeer := m.peers[normalized]
-				existsBootstrap := false
-				for _, bp := range m.bootstrapPeers {
-					if bp == normalized {
-						existsBootstrap = true
-						break
-					}
-				}
-				if !existsPeer {
-					m.TouchReachable(normalized, true)
-				}
-				if !existsBootstrap {
-					m.bootstrapPeers = append(m.bootstrapPeers, normalized)
-				}
-				m.lock.Unlock()
-
-				if existsPeer && existsBootstrap {
-					log.Printf("[peers] runtime mutation no-op from=%s addr=%s reason=already_present", r.RemoteAddr, normalized)
-					writeJSON(w, http.StatusOK, map[string]any{
-						"ok":     true,
-						"status": "unchanged",
-						"addr":   normalized,
-					})
-					return
-				}
-
-				log.Printf("[peers] accepted runtime mutation from=%s addr=%s", r.RemoteAddr, normalized)
-				go m.ConnectToPeers([]string{normalized})
+			if existsPeer && existsBootstrap {
+				log.Printf("[peers] runtime mutation no-op from=%s addr=%s reason=already_present", r.RemoteAddr, normalized)
 				writeJSON(w, http.StatusOK, map[string]any{
 					"ok":     true,
-					"status": "added",
+					"status": "unchanged",
 					"addr":   normalized,
 				})
 				return
 			}
-			if !requireMethod(w, r, http.MethodGet) {
-				return
-			}
 
-			m.lock.RLock()
-			out := make(map[string]Peer, len(m.peers))
-			now := time.Now()
-			for addr, p := range m.peers {
-				pp := *p
-				if !pp.LastSeen.IsZero() {
-					age := int64(now.Sub(pp.LastSeen) / time.Second)
-					if age < 0 {
-						age = 0
-					}
-					pp.LastSeenAgeSec = age
-					pp.TrafficRecently = now.Sub(pp.LastSeen) <= LivenessWindow
-				}
-				switch {
-				case pp.Connected && pp.Reachable && pp.TrafficRecently:
-					pp.ObservedState = "healthy"
-				case pp.Reachable && pp.TrafficRecently:
-					pp.ObservedState = "reachable_recent_traffic"
-				case pp.Reachable:
-					pp.ObservedState = "reachable_no_recent_traffic"
-				case pp.Connected:
-					pp.ObservedState = "connected_state_only"
-				default:
-					pp.ObservedState = "stale_or_unreachable"
-				}
-				out[addr] = pp
-			}
-			m.lock.RUnlock()
-
-			_ = json.NewEncoder(w).Encode(out)
-		})
-
-		mux.HandleFunc("/routes", func(w http.ResponseWriter, _ *http.Request) {
-
-			m.lock.RLock()
-			defer m.lock.RUnlock()
-
-			routes := make([]RouteEntry, 0, len(m.peers))
-
-			for addr, p := range m.peers {
-
-				last := p.LastSeen
-
-				if last.IsZero() {
-					last = time.Now()
-				}
-
-				routes = append(routes, RouteEntry{
-					PeerID:     addr,
-					NextHop:    addr,
-					Distance:   1,
-					LastUpdate: last,
-				})
-			}
-
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"routes": routes,
+			log.Printf("[peers] accepted runtime mutation from=%s addr=%s", r.RemoteAddr, normalized)
+			go m.ConnectToPeers([]string{normalized})
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok":     true,
+				"status": "added",
+				"addr":   normalized,
 			})
-		})
+			return
+		}
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
 
-		go func() {
-
-			log.Println("[mesh] http API →", cfg.HttpListen)
-
-			if err := m.httpSrv.ListenAndServeTLS(httpCertPath, httpKeyPath); err != nil && err != http.ErrServerClosed {
-				log.Println("[mesh] http error:", err)
+		m.lock.RLock()
+		out := make(map[string]Peer, len(m.peers))
+		now := time.Now()
+		for addr, p := range m.peers {
+			pp := *p
+			if !pp.LastSeen.IsZero() {
+				age := int64(now.Sub(pp.LastSeen) / time.Second)
+				if age < 0 {
+					age = 0
+				}
+				pp.LastSeenAgeSec = age
+				pp.TrafficRecently = now.Sub(pp.LastSeen) <= LivenessWindow
 			}
+			switch {
+			case pp.Connected && pp.Reachable && pp.TrafficRecently:
+				pp.ObservedState = "healthy"
+			case pp.Reachable && pp.TrafficRecently:
+				pp.ObservedState = "reachable_recent_traffic"
+			case pp.Reachable:
+				pp.ObservedState = "reachable_no_recent_traffic"
+			case pp.Connected:
+				pp.ObservedState = "connected_state_only"
+			default:
+				pp.ObservedState = "stale_or_unreachable"
+			}
+			out[addr] = pp
+		}
+		m.lock.RUnlock()
 
-		}()
-	}
+		_ = json.NewEncoder(w).Encode(out)
+	})
 
-	return m, nil
+	mux.HandleFunc("/routes", func(w http.ResponseWriter, _ *http.Request) {
+		m.lock.RLock()
+		defer m.lock.RUnlock()
+
+		routes := make([]RouteEntry, 0, len(m.peers))
+		for addr, p := range m.peers {
+			last := p.LastSeen
+			if last.IsZero() {
+				last = time.Now()
+			}
+			routes = append(routes, RouteEntry{
+				PeerID:     addr,
+				NextHop:    addr,
+				Distance:   1,
+				LastUpdate: last,
+			})
+		}
+
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"routes": routes,
+		})
+	})
+
+	go func() {
+		log.Println("[mesh] http API →", cfg.HttpListen)
+		if err := m.httpSrv.ServeTLS(httpLn, httpCertPath, httpKeyPath); err != nil && err != http.ErrServerClosed {
+			log.Println("[mesh] http error:", err)
+		}
+	}()
+
+	return nil
 }
 
 func buildStartupPeerSet(configPeers, bootstrapPeers []string) (map[string]struct{}, error) {

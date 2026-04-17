@@ -142,10 +142,18 @@ func normalizeAndValidateMeshConfig(cfg *MeshConfig, raw map[string]json.RawMess
 		cfg.TLS.CAFile = strings.TrimSpace(cfg.TLS.CAFile)
 	}
 
-	if hasRawField(raw, "listen") && (hasRawField(raw, "host") || hasRawField(raw, "port")) {
-		return fmt.Errorf("config validation: listen and host/port are mutually exclusive; set only one form")
-	}
-	if hasRawField(raw, "host") != hasRawField(raw, "port") {
+	hasListen := hasRawField(raw, "listen")
+	hasHost := hasRawField(raw, "host") && cfg.Host != ""
+	hasPort := hasRawField(raw, "port") && cfg.Port != 0
+
+	if hasListen {
+		if hasHost && hasPort {
+			return fmt.Errorf("config validation: listen and host/port are mutually exclusive; set only one form")
+		}
+		// Keep explicit listen authoritative and ignore stray legacy host/port remnants.
+		cfg.Host = ""
+		cfg.Port = 0
+	} else if hasHost != hasPort {
 		return fmt.Errorf("config validation: host and port must be set together when listen is omitted")
 	}
 	if cfg.Debug != "" {
