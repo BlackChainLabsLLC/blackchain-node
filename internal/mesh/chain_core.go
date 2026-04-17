@@ -82,31 +82,30 @@ func blockRewardForHeight(h int64) int64 {
 	return reward
 }
 
-
 // ========================================
 // PHASE 5.5 TREASURY SCAFFOLD (INACTIVE)
 // ========================================
 
 const (
-        FeeSplitForkHeight int64 = 1279
+	FeeSplitForkHeight int64 = 1279
 
-        ProducerFeeBPS int64 = 9000
-        TreasuryFeeBPS int64 = 1000
+	ProducerFeeBPS int64 = 9000
+	TreasuryFeeBPS int64 = 1000
 )
 
 var TreasuryAddr = "TREASURY_BLACKCHAIN"
 
 func feeSplitActive(height int64) bool {
-        return height >= FeeSplitForkHeight
+	return height >= FeeSplitForkHeight
 }
 
 func splitFees(total int64) (int64, int64) {
-        if total <= 0 {
-                return 0, 0
-        }
-        producer := (total * ProducerFeeBPS) / 10000
-        treasury := total - producer
-        return producer, treasury
+	if total <= 0 {
+		return 0, 0
+	}
+	producer := (total * ProducerFeeBPS) / 10000
+	treasury := total - producer
+	return producer, treasury
 }
 
 // ========================================
@@ -256,10 +255,9 @@ func (c *ProductionChain) addVoteLocked(v Vote) error {
 	return nil
 }
 
-
 func (c *ProductionChain) applyBlockLocked(b Block) error {
-	
-c.ensureGenesisLocked()
+
+	c.ensureGenesisLocked()
 
 	if b.Reward < 0 {
 		return fmt.Errorf("negative block reward")
@@ -288,6 +286,9 @@ c.ensureGenesisLocked()
 	if b.ValidatorID == "" {
 		return fmt.Errorf("missing validator_id")
 	}
+	if b.Producer != b.ValidatorID {
+		return fmt.Errorf("producer must equal validator_id")
+	}
 
 	c.observeValidatorLocked(b.ValidatorID)
 	c.observeValidatorLocked(b.Producer)
@@ -297,8 +298,8 @@ c.ensureGenesisLocked()
 		return fmt.Errorf("bad hash")
 	}
 
-	if !VerifyBlockSignature(b) {
-		return fmt.Errorf("invalid block signature")
+	if err := ValidateBlockSignature(b); err != nil {
+		return err
 	}
 
 	if b.Producer == "" {
@@ -398,7 +399,6 @@ c.ensureGenesisLocked()
 	c.height = b.Height
 	c.tip = b.Hash
 
-
 	c.advanceFinalityLocked()
 	c.tip = b.Hash
 	return nil
@@ -440,6 +440,9 @@ func (c *ProductionChain) applyBlockOrBufferLocked(b Block) (bool, error) {
 	}
 	if b.Hash == "" || b.Hash != c.calcBlockHash(b) {
 		return false, fmt.Errorf("bad hash")
+	}
+	if err := ValidateBlockSignature(b); err != nil {
+		return false, err
 	}
 
 	for _, tx := range b.Txs {
@@ -686,11 +689,10 @@ func (c *ProductionChain) proposeBlock() error {
 	txs := c.mempool
 	c.mempool = nil
 
-        totalFees := int64(0)
-        for _, tx := range txs {
-                totalFees += tx.Fee
-        }
-
+	totalFees := int64(0)
+	for _, tx := range txs {
+		totalFees += tx.Fee
+	}
 
 	b := Block{
 		ProducerAddr: producerAddr,
@@ -698,16 +700,16 @@ func (c *ProductionChain) proposeBlock() error {
 		PrevHash:     c.tip,
 		Txs:          txs,
 		Reward: func() int64 {
-                h := c.height + 1
-                if feeSplitActive(h) {
-                        producerFees, _ := splitFees(totalFees)
-                        return blockRewardForHeight(h) + producerFees
-                }
-                return blockRewardForHeight(h) + totalFees
-        }(),
-		Producer:     pubHex,
-		ValidatorID:  pubHex,
-		TimeUTC:      time.Now().UTC(),
+			h := c.height + 1
+			if feeSplitActive(h) {
+				producerFees, _ := splitFees(totalFees)
+				return blockRewardForHeight(h) + producerFees
+			}
+			return blockRewardForHeight(h) + totalFees
+		}(),
+		Producer:    pubHex,
+		ValidatorID: pubHex,
+		TimeUTC:     time.Now().UTC(),
 	}
 
 	b.BalancesRoot = c.calcStateHashWithBlock(b)
@@ -717,6 +719,7 @@ func (c *ProductionChain) proposeBlock() error {
 	_, err = c.applyBlockOrBufferLocked(b)
 	return err
 }
+
 // ===== PHASE 9: FINALITY SNAPSHOT (READ-ONLY, SAFE) =====
 func (c *ProductionChain) GetFinalitySnapshot() (int64, string, int64) {
 	c.mu.Lock()

@@ -16,6 +16,11 @@ func (m *meshDaemon) startProposerLoop() {
 		defer ticker.Stop()
 
 		for range ticker.C {
+			if err := m.requireValidatorActionReady("proposer_loop"); err != nil {
+				log.Printf("[proposer] disabled tick: %v", err)
+				continue
+			}
+
 			m.chain.mu.Lock()
 
 			before := m.chain.height

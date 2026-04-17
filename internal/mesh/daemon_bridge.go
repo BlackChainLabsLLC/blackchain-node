@@ -187,7 +187,11 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 
 	m.chain.mu.Lock()
 
-	localID := m.chain.ValidatorIDLocked()
+	localID, err := m.chain.EnsureValidatorIdentityLocked()
+	if err != nil {
+		m.chain.mu.Unlock()
+		return nil, fmt.Errorf("validator identity validation failed: %w", err)
+	}
 	if localID != "" && localID != "ERR_NO_VALIDATOR" {
 		m.chain.observeValidatorLocked(localID)
 	}
