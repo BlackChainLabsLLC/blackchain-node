@@ -1,16 +1,15 @@
 package mesh
 
 import (
-	"regexp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
 )
+
 type ChainSnapshot struct {
 	Height       int64              `json:"height"`
 	Hash         string             `json:"hash"`
@@ -69,19 +68,23 @@ func (c *ProductionChain) SaveSnapshotLocked() error {
 // LoadSnapshotFromDisk attempts to load snapshot.json and apply it as chain base.
 // This resets in-memory state to snapshot, then replays any persisted blocks ABOVE snapshot height.
 func (c *ProductionChain) LoadSnapshotFromDisk() (bool, error) {
-	exactBlockJSONNameRE := regexp.MustCompile(`^[0-9]+\.json$`)
+	loaded, _, err := c.loadSnapshotFromDiskLocked()
+	return loaded, err
+}
+
+func (c *ProductionChain) loadSnapshotFromDiskLocked() (bool, int, error) {
 	path := c.snapshotPath()
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return false, nil
+			return false, 0, nil
 		}
-		return false, err
+		return false, 0, err
 	}
 
 	var snap ChainSnapshot
 	if err := json.Unmarshal(raw, &snap); err != nil {
-		return false, err
+		return false, 0, err
 	}
 
 	// Reset chain state to snapshot
@@ -93,73 +96,27 @@ func (c *ProductionChain) LoadSnapshotFromDisk() (bool, error) {
 		c.accounts[k] = &vv
 	}
 	if snap.AccountsHash == "" {
-		return false, fmt.Errorf("snapshot missing accounts_hash")
+		return false, 0, fmt.Errorf("snapshot missing accounts_hash")
 	}
 	if computeAccountsHash(c.accounts) != snap.AccountsHash {
-		return false, fmt.Errorf("snapshot accounts_hash mismatch")
+		return false, 0, fmt.Errorf("snapshot accounts_hash mismatch")
 	}
 	if snap.SnapshotHash == "" {
-		return false, fmt.Errorf("snapshot missing snapshot_hash")
+		return false, 0, fmt.Errorf("snapshot missing snapshot_hash")
 	}
 	if computeSnapshotHash(snap.Height, snap.Hash, snap.AccountsHash) != snap.SnapshotHash {
-		return false, fmt.Errorf("snapshot hash mismatch")
+		return false, 0, fmt.Errorf("snapshot hash mismatch")
 	}
 	c.blocks = make(map[int64]Block)
 	c.pending = make(map[int64]Block)
 	c.mempool = make([]Tx, 0, 256)
 
 	// Replay persisted blocks above snapshot height, if any exist.
-	dir := c.blockDir()
-	ents, err := os.ReadDir(dir)
+	replayed, err := c.replayBlocksFromHeightLocked(snap.Height)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return true, nil
-		}
-		return false, err
+		return false, replayed, err
 	}
-
-	type pair struct {
-		h int64
-		p string
-	}
-	var files []pair
-	for _, e := range ents {
-		name := e.Name()
-		if !exactBlockJSONNameRE.MatchString(name) {
-			continue
-		}
-		var h int64
-		if _, err := fmt.Sscanf(name, "%d.json", &h); err == nil && h > snap.Height {
-			files = append(files, pair{h: h, p: filepath.Join(dir, e.Name())})
-		}
-	}
-	sort.Slice(files, func(i, j int) bool { return files[i].h < files[j].h })
-
-	maxH := int64(-1)
-	if len(files) > 0 {
-		maxH = files[len(files)-1].h
-	}
-
-	for _, f := range files {
-		raw, err := os.ReadFile(f.p)
-		if err != nil {
-			return false, err
-		}
-		var b Block
-		if err := json.Unmarshal(raw, &b); err != nil {
-			if f.h == maxH {
-				log.Printf("[snapshot] skipping malformed tail block height=%d path=%s err=%v", f.h, f.p, err)
-				continue
-			}
-			return false, fmt.Errorf("replay post-snapshot decode height %d path %s: %w", f.h, f.p, err)
-		}
-		// Use full validation
-		if err := c.applyBlockLocked(b); err != nil {
-			return false, fmt.Errorf("replay post-snapshot height %d: %w", b.Height, err)
-		}
-	}
-
-	return true, nil
+	return true, replayed, nil
 }
 
 // LoadSnapshotFromBytes applies a snapshot payload received over the mesh.

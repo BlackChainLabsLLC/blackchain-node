@@ -175,12 +175,18 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 	m.chain.dataDir = m.dataDir
 	m.chain.persistDir = m.persistDir
 
-	if _, err := m.chain.LoadSnapshotFromDisk(); err != nil {
+	report, err := m.chain.RecoverFromDisk()
+	if err != nil {
+		if report.QuarantineDir != "" {
+			log.Printf("[startup] corruption halt mode=%s quarantine=%s reason=%s", report.Mode, report.QuarantineDir, report.Reason)
+		}
 		return nil, err
 	}
-
-	if err := m.chain.loadFromDisk(); err != nil {
-		return nil, err
+	if report.Mode == StartupModeSnapshotRestore || report.Mode == StartupModeReplayStart || report.Mode == StartupModeCleanStart {
+		log.Printf("[startup] recovery complete mode=%s height=%d replayed=%d", report.Mode, report.Height, report.Replayed)
+	}
+	if report.Mode == StartupModeCorruptionHalt {
+		return nil, fmt.Errorf("startup halted due to on-disk corruption")
 	}
 
 	m.chain.daemon = m
