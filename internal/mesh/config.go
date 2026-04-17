@@ -69,12 +69,7 @@ func LoadMeshConfig(path string) (*MeshConfig, error) {
 		return nil, err
 	}
 
-	// Canonical mesh TCP bind
-	if strings.TrimSpace(cfg.Listen) == "" && strings.TrimSpace(cfg.Host) != "" && cfg.Port != 0 {
-		cfg.Listen = net.JoinHostPort(strings.TrimSpace(cfg.Host), strconv.Itoa(cfg.Port))
-	}
-
-	if err := validateMeshConfig(&cfg); err != nil {
+	if err := normalizeAndValidateMeshConfig(&cfg, raw); err != nil {
 		return nil, err
 	}
 
@@ -89,6 +84,9 @@ func validateRequiredMeshConfigFields(raw map[string]json.RawMessage) error {
 		return fmt.Errorf("config validation: missing required field: node_id")
 	}
 	if _, ok := raw["http_listen"]; !ok {
+		if _, legacy := raw["debug"]; legacy {
+			return fmt.Errorf("config validation: missing required field: http_listen (legacy debug is not supported; use http_listen)")
+		}
 		return fmt.Errorf("config validation: missing required field: http_listen")
 	}
 	if _, ok := raw["listen"]; ok {
@@ -130,10 +128,44 @@ func validateBootstrapConfig(raw map[string]json.RawMessage) error {
 	return nil
 }
 
-func validateMeshConfig(cfg *MeshConfig) error {
+func normalizeAndValidateMeshConfig(cfg *MeshConfig, raw map[string]json.RawMessage) error {
 	cfg.NodeID = strings.TrimSpace(cfg.NodeID)
 	cfg.Listen = strings.TrimSpace(cfg.Listen)
+	cfg.Host = strings.TrimSpace(cfg.Host)
+	cfg.Debug = strings.TrimSpace(cfg.Debug)
 	cfg.HttpListen = strings.TrimSpace(cfg.HttpListen)
+	cfg.DataDir = strings.TrimSpace(cfg.DataDir)
+	cfg.PersistDir = strings.TrimSpace(cfg.PersistDir)
+	if cfg.TLS != nil {
+		cfg.TLS.CertFile = strings.TrimSpace(cfg.TLS.CertFile)
+		cfg.TLS.KeyFile = strings.TrimSpace(cfg.TLS.KeyFile)
+		cfg.TLS.CAFile = strings.TrimSpace(cfg.TLS.CAFile)
+	}
+
+	if hasRawField(raw, "listen") && (hasRawField(raw, "host") || hasRawField(raw, "port")) {
+		return fmt.Errorf("config validation: listen and host/port are mutually exclusive; set only one form")
+	}
+	if hasRawField(raw, "host") != hasRawField(raw, "port") {
+		return fmt.Errorf("config validation: host and port must be set together when listen is omitted")
+	}
+	if cfg.Debug != "" {
+		return fmt.Errorf("config validation: legacy debug field is not supported; use http_listen plus debug_endpoints_enabled/admin_endpoints_enabled")
+	}
+
+	// Canonical mesh TCP bind
+	if cfg.Listen == "" && cfg.Host != "" && cfg.Port != 0 {
+		cfg.Listen = net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
+	}
+
+	return validateMeshConfig(cfg)
+}
+
+func hasRawField(raw map[string]json.RawMessage, key string) bool {
+	_, ok := raw[key]
+	return ok
+}
+
+func validateMeshConfig(cfg *MeshConfig) error {
 
 	if cfg.NodeID == "" {
 		return fmt.Errorf("config validation: node_id must not be empty")
@@ -152,6 +184,21 @@ func validateMeshConfig(cfg *MeshConfig) error {
 	}
 	if sameSocket(cfg.Listen, cfg.HttpListen) {
 		return fmt.Errorf("config validation: listen and http_listen must not use the same address: %s", cfg.Listen)
+	}
+	debugEnabled := resolveHTTPSurfaceEnabled(cfg.DebugEndpointsEnabled, cfg.HttpListen)
+	adminEnabled := resolveHTTPSurfaceEnabled(cfg.AdminEndpointsEnabled, cfg.HttpListen)
+	if !isLoopbackHTTPListen(cfg.HttpListen) {
+		if debugEnabled {
+			return fmt.Errorf("config validation: debug_endpoints_enabled requires loopback-only http_listen; got %s", cfg.HttpListen)
+		}
+		if adminEnabled {
+			return fmt.Errorf("config validation: admin_endpoints_enabled requires loopback-only http_listen; got %s", cfg.HttpListen)
+		}
+	}
+	if cfg.TLS != nil {
+		if err := cfg.TLS.validate(); err != nil {
+			return err
+		}
 	}
 
 	seen := make(map[string]struct{}, len(cfg.Peers))
@@ -186,6 +233,18 @@ func validateMeshConfig(cfg *MeshConfig) error {
 		}
 	}
 
+	return nil
+}
+
+func validateNonWildcardListen(field, addr string) error {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil {
+		return fmt.Errorf("config validation: invalid %s address %q: %w", field, addr, err)
+	}
+	host = strings.TrimSpace(host)
+	if host == "" || host == "0.0.0.0" || host == "::" || host == "[::]" {
+		return fmt.Errorf("config validation: %s must not use a wildcard bind: %s", field, addr)
+	}
 	return nil
 }
 

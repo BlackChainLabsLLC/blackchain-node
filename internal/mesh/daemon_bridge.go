@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -105,6 +106,23 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 		return nil, err
 	}
 
+	nodeName := strings.TrimSpace(cfg.NodeID)
+	if nodeName == "" {
+		nodeName = "node1"
+	}
+
+	dataDir := strings.TrimSpace(opts.DataDir)
+	if dataDir == "" {
+		dataDir = strings.TrimSpace(cfg.DataDir)
+	}
+	if dataDir == "" {
+		dataDir = filepath.Join("data", nodeName)
+	}
+
+	if err := validateStartupDependencies(cfg, dataDir); err != nil {
+		return nil, err
+	}
+
 	// ===== CONFIG SNAPSHOT (SOURCE OF TRUTH) =====
 	log.Println("[mesh] ===== CONFIG SNAPSHOT =====")
 	log.Println("[mesh] node_id =", cfg.NodeID)
@@ -118,19 +136,6 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 	ln, err := meshListen(cfg.Listen, cfg.TLS)
 	if err != nil {
 		return nil, fmt.Errorf("listen %s: %w", cfg.Listen, err)
-	}
-
-	nodeName := strings.TrimSpace(cfg.NodeID)
-	if nodeName == "" {
-		nodeName = "node1"
-	}
-
-	dataDir := strings.TrimSpace(opts.DataDir)
-	if dataDir == "" {
-		dataDir = strings.TrimSpace(cfg.DataDir)
-	}
-	if dataDir == "" {
-		dataDir = filepath.Join("data", nodeName)
 	}
 
 	walletPath := filepath.Join(dataDir, "wallet.json")
@@ -279,15 +284,7 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 	}
 
 	if cfg.HttpListen != "" {
-
-		httpHost := "127.0.0.1"
-		if h, _, err := net.SplitHostPort(strings.TrimSpace(cfg.HttpListen)); err == nil && strings.TrimSpace(h) != "" {
-			httpHost = strings.TrimSpace(h)
-		} else if strings.TrimSpace(cfg.Host) != "" {
-			httpHost = strings.TrimSpace(cfg.Host)
-		}
-
-		httpCertPath, httpKeyPath, err := ensureHTTPServerTLSFiles(dataDir, httpHost, cfg.TLS)
+		httpCertPath, httpKeyPath, err := ensureHTTPServerTLSFiles(dataDir, httpHostForListen(cfg.HttpListen, cfg.Host), cfg.TLS)
 		if err != nil {
 			return nil, fmt.Errorf("http tls files: %w", err)
 		}
@@ -599,6 +596,78 @@ func preflightBindCheck(addrs ...string) error {
 		_ = l.Close()
 	}
 	return nil
+}
+
+func validateStartupDependencies(cfg *MeshConfig, dataDir string) error {
+	if cfg == nil {
+		return fmt.Errorf("startup validation: nil mesh config")
+	}
+	if err := validateRuntimePaths(dataDir, cfg.PersistDir); err != nil {
+		return err
+	}
+	if cfg.TLS != nil {
+		if err := cfg.TLS.validate(); err != nil {
+			return err
+		}
+	}
+	if _, _, err := ensureHTTPServerTLSFiles(dataDir, httpHostForListen(cfg.HttpListen, cfg.Host), cfg.TLS); err != nil {
+		return fmt.Errorf("startup validation: http tls material: %w", err)
+	}
+	return nil
+}
+
+func validateRuntimePaths(dataDir, persistDir string) error {
+	if err := ensureDirAccessible("data_dir", dataDir); err != nil {
+		return err
+	}
+	if strings.TrimSpace(persistDir) != "" {
+		if err := ensureDirAccessible("persist_dir", persistDir); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureDirAccessible(label, dir string) error {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return fmt.Errorf("startup validation: %s must not be empty", label)
+	}
+	if info, err := os.Stat(dir); err == nil {
+		if !info.IsDir() {
+			return fmt.Errorf("startup validation: %s path must be a directory: %s", label, dir)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("startup validation: stat %s %s: %w", label, dir, err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("startup validation: create %s %s: %w", label, dir, err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("startup validation: stat %s %s: %w", label, dir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("startup validation: %s path must be a directory: %s", label, dir)
+	}
+	f, err := os.CreateTemp(dir, ".startup-check-*")
+	if err != nil {
+		return fmt.Errorf("startup validation: %s is not writable: %s: %w", label, dir, err)
+	}
+	name := f.Name()
+	_ = f.Close()
+	_ = os.Remove(name)
+	return nil
+}
+
+func httpHostForListen(httpListen, fallbackHost string) string {
+	httpHost := "127.0.0.1"
+	if h, _, err := net.SplitHostPort(strings.TrimSpace(httpListen)); err == nil && strings.TrimSpace(h) != "" {
+		httpHost = strings.TrimSpace(h)
+	} else if strings.TrimSpace(fallbackHost) != "" {
+		httpHost = strings.TrimSpace(fallbackHost)
+	}
+	return httpHost
 }
 
 func resolveHTTPSurfaceEnabled(override *bool, httpListen string) bool {

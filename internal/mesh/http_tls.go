@@ -21,7 +21,10 @@ import (
 // - If mesh TLS is configured, reuse that CA-issued keypair.
 // - Otherwise, use a shared local HTTP CA rooted under the data dir parent.
 func ensureHTTPServerTLSFiles(dataDir, host string, meshTLS *MeshTLS) (certPath, keyPath string, _ error) {
-	if meshTLS != nil && meshTLS.Enabled && meshTLS.CertFile != "" && meshTLS.KeyFile != "" && meshTLS.CAFile != "" {
+	if meshTLS != nil && meshTLS.Enabled {
+		if err := meshTLS.validate(); err != nil {
+			return "", "", err
+		}
 		return meshTLS.CertFile, meshTLS.KeyFile, nil
 	}
 	if dataDir == "" {
@@ -31,11 +34,30 @@ func ensureHTTPServerTLSFiles(dataDir, host string, meshTLS *MeshTLS) (certPath,
 	certPath = filepath.Join(dataDir, "http_tls_cert.pem")
 	keyPath = filepath.Join(dataDir, "http_tls_key.pem")
 
-	// If both exist, trust them.
+	certExists := false
 	if _, err := os.Stat(certPath); err == nil {
-		if _, err2 := os.Stat(keyPath); err2 == nil {
+		certExists = true
+	}
+	keyExists := false
+	if _, err := os.Stat(keyPath); err == nil {
+		keyExists = true
+	}
+	if certExists != keyExists {
+		return "", "", fmt.Errorf("http tls material is incomplete: cert=%t key=%t", certExists, keyExists)
+	}
+
+	// If both exist, trust them.
+	if certExists && keyExists {
+		if err := validateTLSFile("http tls cert", certPath, false); err != nil {
+			return "", "", err
+		}
+		if err := validateTLSFile("http tls key", keyPath, true); err != nil {
+			return "", "", err
+		}
+		if _, err := tls.LoadX509KeyPair(certPath, keyPath); err == nil {
 			return certPath, keyPath, nil
 		}
+		return "", "", fmt.Errorf("http tls material is invalid: cert/key pair could not be loaded")
 	}
 
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
