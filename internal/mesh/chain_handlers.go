@@ -57,29 +57,29 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 	// STATUS
 	// --------------------
 	mux.HandleFunc("/chain/status", func(w http.ResponseWriter, r *http.Request) {
-	m.chain.mu.RLock()
-	height := m.chain.height
-	tip := m.chain.tip
-	finalizedHeight := m.chain.finalizedHeight
-	finalizedTip := ""
-	if finalizedHeight > 0 {
-		if b, ok := m.chain.blocks[finalizedHeight]; ok {
-			finalizedTip = b.Hash
+		m.chain.mu.RLock()
+		height := m.chain.height
+		tip := m.chain.tip
+		finalizedHeight := m.chain.finalizedHeight
+		finalizedTip := ""
+		if finalizedHeight > 0 {
+			if b, ok := m.chain.blocks[finalizedHeight]; ok {
+				finalizedTip = b.Hash
+			}
 		}
-	}
-	m.chain.mu.RUnlock()
+		m.chain.mu.RUnlock()
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"height":           height,
-		"tip":              tip,
-		"finalized_height": finalizedHeight,
-		"finalized_tip":    finalizedTip,
-		"finality_depth":   finalityDepth,
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"height":           height,
+			"tip":              tip,
+			"finalized_height": finalizedHeight,
+			"finalized_tip":    finalizedTip,
+			"finality_depth":   finalityDepth,
+		})
 	})
-})
 
-// ===== PHASE 9: /chain/finality =====
+	// ===== PHASE 9: /chain/finality =====
 	mux.HandleFunc("/chain/finality", func(w http.ResponseWriter, r *http.Request) {
 		h, tip, depth := m.chain.GetFinalitySnapshot()
 
@@ -134,12 +134,10 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 		m.chain.mu.Lock()
 		defer m.chain.mu.Unlock()
 
-		if err := m.chain.validateTx(tx); err != nil {
+		if err := m.chain.addTxToMempoolLocked(tx); err != nil {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-
-		m.chain.mempool = append(m.chain.mempool, tx)
 
 		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 	})
@@ -246,7 +244,7 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 			return
 		}
 		b := m.chain.blocks[m.chain.height]
-			_ = b
+		_ = b
 		m.chain.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 	})

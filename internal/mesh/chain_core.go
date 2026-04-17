@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,8 @@ const (
 	BaseFee           int64 = 1
 	FeeCongestionStep       = 256
 	FeeStepIncrement  int64 = 1
+	MaxMempoolTxs           = 2048
+	MaxBlockTxs             = 512
 )
 
 func (c *ProductionChain) requiredFeeLocked() int64 {
@@ -82,31 +85,30 @@ func blockRewardForHeight(h int64) int64 {
 	return reward
 }
 
-
 // ========================================
 // PHASE 5.5 TREASURY SCAFFOLD (INACTIVE)
 // ========================================
 
 const (
-        FeeSplitForkHeight int64 = 1279
+	FeeSplitForkHeight int64 = 1279
 
-        ProducerFeeBPS int64 = 9000
-        TreasuryFeeBPS int64 = 1000
+	ProducerFeeBPS int64 = 9000
+	TreasuryFeeBPS int64 = 1000
 )
 
 var TreasuryAddr = "TREASURY_BLACKCHAIN"
 
 func feeSplitActive(height int64) bool {
-        return height >= FeeSplitForkHeight
+	return height >= FeeSplitForkHeight
 }
 
 func splitFees(total int64) (int64, int64) {
-        if total <= 0 {
-                return 0, 0
-        }
-        producer := (total * ProducerFeeBPS) / 10000
-        treasury := total - producer
-        return producer, treasury
+	if total <= 0 {
+		return 0, 0
+	}
+	producer := (total * ProducerFeeBPS) / 10000
+	treasury := total - producer
+	return producer, treasury
 }
 
 // ========================================
@@ -129,9 +131,11 @@ type ProductionChain struct {
 	height     int64
 	tip        string
 
-	blocks   map[int64]Block
-	accounts map[string]*Account
-	mempool  []Tx
+	blocks             map[int64]Block
+	accounts           map[string]*Account
+	mempool            []Tx
+	mempoolIDs         map[string]struct{}
+	mempoolSenderNonce map[string]string
 
 	pending    map[int64]Block
 	voteCounts map[int64]int
@@ -145,13 +149,15 @@ type ProductionChain struct {
 
 func newProductionChain() *ProductionChain {
 	return &ProductionChain{
-		blocks:       make(map[int64]Block),
-		accounts:     make(map[string]*Account),
-		mempool:      make([]Tx, 0, 256),
-		pending:      make(map[int64]Block),
-		voteCounts:   make(map[int64]int),
-		votes:        make(map[int64]map[string]Vote),
-		validatorSet: make(map[string]struct{}),
+		blocks:             make(map[int64]Block),
+		accounts:           make(map[string]*Account),
+		mempool:            make([]Tx, 0, 256),
+		mempoolIDs:         make(map[string]struct{}),
+		mempoolSenderNonce: make(map[string]string),
+		pending:            make(map[int64]Block),
+		voteCounts:         make(map[int64]int),
+		votes:              make(map[int64]map[string]Vote),
+		validatorSet:       make(map[string]struct{}),
 	}
 }
 
@@ -204,11 +210,11 @@ func (c *ProductionChain) calcBlockHash(b Block) string {
 }
 
 func (c *ProductionChain) validateTx(tx Tx) error {
-	if !VerifyTxSignature(tx) {
-		return fmt.Errorf("tx invalid: bad signature")
-	}
 	if tx.From == "" || tx.To == "" {
 		return fmt.Errorf("missing from/to")
+	}
+	if tx.Nonce < 0 {
+		return fmt.Errorf("nonce < 0")
 	}
 	if tx.From == tx.To {
 		return fmt.Errorf("from == to")
@@ -218,6 +224,12 @@ func (c *ProductionChain) validateTx(tx Tx) error {
 	}
 	if tx.Fee < 0 {
 		return fmt.Errorf("fee < 0")
+	}
+	if len(tx.From) > 128 || len(tx.To) > 128 || len(tx.PubKey) > 256 || len(tx.Signature) > 256 {
+		return fmt.Errorf("tx field too large")
+	}
+	if !VerifyTxSignature(tx) {
+		return fmt.Errorf("tx invalid: bad signature")
 	}
 
 	reqFee := c.requiredFeeLocked()
@@ -234,6 +246,143 @@ func (c *ProductionChain) validateTx(tx Tx) error {
 	}
 
 	return nil
+}
+
+func txID(tx Tx) string {
+	raw, _ := json.Marshal(tx)
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+func senderNonceKey(tx Tx) string {
+	return tx.From + "#" + strconv.FormatInt(tx.Nonce, 10)
+}
+
+func (c *ProductionChain) resetMempoolLocked(capHint int) {
+	if capHint < 0 {
+		capHint = 0
+	}
+	c.mempool = make([]Tx, 0, capHint)
+	c.mempoolIDs = make(map[string]struct{})
+	c.mempoolSenderNonce = make(map[string]string)
+}
+
+func (c *ProductionChain) rebuildMempoolIndexLocked() {
+	c.mempoolIDs = make(map[string]struct{}, len(c.mempool))
+	c.mempoolSenderNonce = make(map[string]string, len(c.mempool))
+	for _, tx := range c.mempool {
+		id := txID(tx)
+		c.mempoolIDs[id] = struct{}{}
+		c.mempoolSenderNonce[senderNonceKey(tx)] = id
+	}
+}
+
+func (c *ProductionChain) addTxToMempoolLocked(tx Tx) error {
+	if len(c.mempool) >= MaxMempoolTxs {
+		return fmt.Errorf("mempool full (%d)", MaxMempoolTxs)
+	}
+	if err := c.validateTx(tx); err != nil {
+		return err
+	}
+	if c.mempoolIDs == nil || c.mempoolSenderNonce == nil {
+		c.rebuildMempoolIndexLocked()
+	}
+
+	id := txID(tx)
+	if _, ok := c.mempoolIDs[id]; ok {
+		return fmt.Errorf("duplicate tx")
+	}
+
+	if _, ok := c.mempoolSenderNonce[senderNonceKey(tx)]; ok {
+		return fmt.Errorf("conflicting tx nonce already pending")
+	}
+
+	pendingDebit := int64(0)
+	for _, pending := range c.mempool {
+		if pending.From == tx.From {
+			pendingDebit += pending.Amount + pending.Fee
+		}
+	}
+	from := c.getOrCreateAccount(tx.From)
+	if from.Balance < pendingDebit+tx.Amount+tx.Fee {
+		return fmt.Errorf("insufficient balance with pending txs")
+	}
+
+	c.mempool = append(c.mempool, tx)
+	c.mempoolIDs[id] = struct{}{}
+	c.mempoolSenderNonce[senderNonceKey(tx)] = id
+	return nil
+}
+
+func (c *ProductionChain) compactMempoolLocked() {
+	if len(c.mempool) == 0 {
+		c.resetMempoolLocked(0)
+		return
+	}
+
+	type acctSnap struct {
+		bal   int64
+		nonce int64
+	}
+	accts := make(map[string]acctSnap)
+	get := func(addr string) acctSnap {
+		if v, ok := accts[addr]; ok {
+			return v
+		}
+		a := c.getOrCreateAccount(addr)
+		v := acctSnap{bal: a.Balance, nonce: a.Nonce}
+		accts[addr] = v
+		return v
+	}
+	put := func(addr string, v acctSnap) { accts[addr] = v }
+
+	reqFee := c.requiredFeeLocked()
+	accepted := make([]Tx, 0, len(c.mempool))
+	seenID := make(map[string]struct{}, len(c.mempool))
+	seenSenderNonce := make(map[string]struct{}, len(c.mempool))
+	for _, tx := range c.mempool {
+		if tx.From == "" || tx.To == "" || tx.From == tx.To || tx.Amount <= 0 || tx.Fee < reqFee || tx.Nonce < 0 {
+			continue
+		}
+		if !VerifyTxSignature(tx) {
+			continue
+		}
+
+		id := txID(tx)
+		if _, dup := seenID[id]; dup {
+			continue
+		}
+		sn := senderNonceKey(tx)
+		if _, conflict := seenSenderNonce[sn]; conflict {
+			continue
+		}
+
+		from := get(tx.From)
+		if tx.Nonce != from.nonce {
+			continue
+		}
+		if from.bal < tx.Amount+tx.Fee {
+			continue
+		}
+		from.bal -= (tx.Amount + tx.Fee)
+		from.nonce++
+		put(tx.From, from)
+
+		accepted = append(accepted, tx)
+		seenID[id] = struct{}{}
+		seenSenderNonce[sn] = struct{}{}
+		if len(accepted) >= MaxMempoolTxs {
+			break
+		}
+	}
+
+	c.resetMempoolLocked(len(accepted))
+	for _, tx := range accepted {
+		id := txID(tx)
+		c.mempool = append(c.mempool, tx)
+		c.mempoolIDs[id] = struct{}{}
+		c.mempoolSenderNonce[senderNonceKey(tx)] = id
+	}
 }
 
 func (c *ProductionChain) addVoteLocked(v Vote) error {
@@ -256,10 +405,9 @@ func (c *ProductionChain) addVoteLocked(v Vote) error {
 	return nil
 }
 
-
 func (c *ProductionChain) applyBlockLocked(b Block) error {
-	
-c.ensureGenesisLocked()
+
+	c.ensureGenesisLocked()
 
 	if b.Reward < 0 {
 		return fmt.Errorf("negative block reward")
@@ -305,17 +453,6 @@ c.ensureGenesisLocked()
 		return fmt.Errorf("missing producer")
 	}
 
-	expectedReward := func() int64 {
-		if feeSplitActive(b.Height) {
-			producerFees, _ := splitFees(totalFees)
-			return blockRewardForHeight(b.Height) + producerFees
-		}
-		return blockRewardForHeight(b.Height) + totalFees
-	}()
-	if b.Reward != expectedReward {
-		return fmt.Errorf("bad reward: got=%d want=%d", b.Reward, expectedReward)
-	}
-
 	expectedRoot := c.calcStateHashWithBlock(b)
 	if b.BalancesRoot == "" {
 		return fmt.Errorf("missing balances_root")
@@ -359,6 +496,9 @@ c.ensureGenesisLocked()
 		if tx.Fee < 0 {
 			return fmt.Errorf("tx invalid: negative fee")
 		}
+		if tx.Nonce != f.nonce {
+			return fmt.Errorf("tx invalid: bad nonce in block (have %d want %d)", tx.Nonce, f.nonce)
+		}
 		if f.bal < tx.Amount+tx.Fee {
 			return fmt.Errorf("tx invalid: insufficient balance incl fee")
 		}
@@ -370,6 +510,16 @@ c.ensureGenesisLocked()
 
 		put(tx.From, f)
 		put(tx.To, t)
+	}
+	expectedReward := func() int64 {
+		if feeSplitActive(b.Height) {
+			producerFees, _ := splitFees(totalFees)
+			return blockRewardForHeight(b.Height) + producerFees
+		}
+		return blockRewardForHeight(b.Height) + totalFees
+	}()
+	if b.Reward != expectedReward {
+		return fmt.Errorf("bad reward: got=%d want=%d", b.Reward, expectedReward)
 	}
 
 	for addr, v := range s {
@@ -398,8 +548,8 @@ c.ensureGenesisLocked()
 	c.height = b.Height
 	c.tip = b.Hash
 
-
 	c.advanceFinalityLocked()
+	c.compactMempoolLocked()
 	c.tip = b.Hash
 	return nil
 }
@@ -683,14 +833,21 @@ func (c *ProductionChain) proposeBlock() error {
 	}
 	priv := ed25519.PrivateKey(privBytes)
 
-	txs := c.mempool
-	c.mempool = nil
+	c.compactMempoolLocked()
+	limit := len(c.mempool)
+	if limit > MaxBlockTxs {
+		limit = MaxBlockTxs
+	}
+	txs := make([]Tx, limit)
+	copy(txs, c.mempool[:limit])
+	remaining := append([]Tx(nil), c.mempool[limit:]...)
+	c.mempool = remaining
+	c.rebuildMempoolIndexLocked()
 
-        totalFees := int64(0)
-        for _, tx := range txs {
-                totalFees += tx.Fee
-        }
-
+	totalFees := int64(0)
+	for _, tx := range txs {
+		totalFees += tx.Fee
+	}
 
 	b := Block{
 		ProducerAddr: producerAddr,
@@ -698,16 +855,16 @@ func (c *ProductionChain) proposeBlock() error {
 		PrevHash:     c.tip,
 		Txs:          txs,
 		Reward: func() int64 {
-                h := c.height + 1
-                if feeSplitActive(h) {
-                        producerFees, _ := splitFees(totalFees)
-                        return blockRewardForHeight(h) + producerFees
-                }
-                return blockRewardForHeight(h) + totalFees
-        }(),
-		Producer:     pubHex,
-		ValidatorID:  pubHex,
-		TimeUTC:      time.Now().UTC(),
+			h := c.height + 1
+			if feeSplitActive(h) {
+				producerFees, _ := splitFees(totalFees)
+				return blockRewardForHeight(h) + producerFees
+			}
+			return blockRewardForHeight(h) + totalFees
+		}(),
+		Producer:    pubHex,
+		ValidatorID: pubHex,
+		TimeUTC:     time.Now().UTC(),
 	}
 
 	b.BalancesRoot = c.calcStateHashWithBlock(b)
@@ -717,6 +874,7 @@ func (c *ProductionChain) proposeBlock() error {
 	_, err = c.applyBlockOrBufferLocked(b)
 	return err
 }
+
 // ===== PHASE 9: FINALITY SNAPSHOT (READ-ONLY, SAFE) =====
 func (c *ProductionChain) GetFinalitySnapshot() (int64, string, int64) {
 	c.mu.Lock()

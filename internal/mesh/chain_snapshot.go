@@ -1,7 +1,6 @@
 package mesh
 
 import (
-	"regexp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -9,8 +8,10 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 )
+
 type ChainSnapshot struct {
 	Height       int64              `json:"height"`
 	Hash         string             `json:"hash"`
@@ -106,7 +107,7 @@ func (c *ProductionChain) LoadSnapshotFromDisk() (bool, error) {
 	}
 	c.blocks = make(map[int64]Block)
 	c.pending = make(map[int64]Block)
-	c.mempool = make([]Tx, 0, 256)
+	c.resetMempoolLocked(256)
 
 	// Replay persisted blocks above snapshot height, if any exist.
 	dir := c.blockDir()
@@ -194,7 +195,7 @@ func (c *ProductionChain) LoadSnapshotFromBytes(raw []byte) (bool, error) {
 
 	c.blocks = make(map[int64]Block)
 	c.pending = make(map[int64]Block)
-	c.mempool = make([]Tx, 0, 256)
+	c.resetMempoolLocked(256)
 
 	return true, nil
 }
