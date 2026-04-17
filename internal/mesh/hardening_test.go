@@ -152,16 +152,19 @@ func TestApplyBlockOrBufferRejectsConflictingStaleAndPending(t *testing.T) {
 	c.mu.Lock()
 	applied, err = c.applyBlockOrBufferLocked(b1)
 	c.mu.Unlock()
-	if err != nil || applied {
-		t.Fatalf("duplicate block should no-op, applied=%v err=%v", applied, err)
+	if err == nil || applied {
+		t.Fatalf("duplicate block should be rejected, applied=%v err=%v", applied, err)
+	}
+	if !strings.Contains(err.Error(), "duplicate committed proposal") {
+		t.Fatalf("expected duplicate committed proposal rejection, got %v", err)
 	}
 
 	conflictStale := makeSignedBlockForChain(t, c, 1, "", time.Unix(101, 0))
 	c.mu.Lock()
 	_, err = c.applyBlockOrBufferLocked(conflictStale)
 	c.mu.Unlock()
-	if err == nil || !strings.Contains(err.Error(), "conflicting stale block") {
-		t.Fatalf("expected conflicting stale block rejection, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "conflicting committed proposal") {
+		t.Fatalf("expected conflicting committed proposal rejection, got %v", err)
 	}
 
 	pendingA := makeSignedBlockForChain(t, c, 3, "future-prev-a", time.Unix(200, 0))
@@ -176,8 +179,8 @@ func TestApplyBlockOrBufferRejectsConflictingStaleAndPending(t *testing.T) {
 	c.mu.Lock()
 	_, err = c.applyBlockOrBufferLocked(pendingB)
 	c.mu.Unlock()
-	if err == nil || !strings.Contains(err.Error(), "conflicting pending block") {
-		t.Fatalf("expected conflicting pending block rejection, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "conflicting pending proposal") {
+		t.Fatalf("expected conflicting pending proposal rejection, got %v", err)
 	}
 }
 
