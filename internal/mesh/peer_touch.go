@@ -6,6 +6,12 @@ import (
 	"time"
 )
 
+const (
+	peerFailureSuppressAfter = 3
+	peerFailureSuppressStep  = 15 * time.Second
+	peerFailureSuppressMax   = 60 * time.Second
+)
+
 func normalizeHost(h string) string {
 	h = strings.TrimSpace(h)
 	if h == "" {
@@ -68,6 +74,8 @@ func (m *meshDaemon) TouchPeer(addr string) {
 	}
 	p.Connected = true
 	p.LastSeen = time.Now()
+	p.FailureCount = 0
+	p.SuppressedUntil = time.Time{}
 }
 
 // TouchReachable = dial success/failure observed.
@@ -86,4 +94,32 @@ func (m *meshDaemon) TouchReachable(addr string, ok bool) {
 		m.peers[addr] = p
 	}
 	p.Reachable = ok
+	if ok {
+		p.FailureCount = 0
+		p.SuppressedUntil = time.Time{}
+		return
+	}
+	p.FailureCount++
+	if p.FailureCount >= peerFailureSuppressAfter {
+		steps := p.FailureCount - peerFailureSuppressAfter + 1
+		suppressFor := time.Duration(steps) * peerFailureSuppressStep
+		if suppressFor > peerFailureSuppressMax {
+			suppressFor = peerFailureSuppressMax
+		}
+		p.SuppressedUntil = time.Now().Add(suppressFor)
+	}
+}
+
+func (m *meshDaemon) shouldDialPeer(addr string, now time.Time) bool {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return false
+	}
+	m.lock.RLock()
+	defer m.lock.RUnlock()
+	p, ok := m.peers[addr]
+	if !ok {
+		return true
+	}
+	return p.SuppressedUntil.IsZero() || !now.Before(p.SuppressedUntil)
 }

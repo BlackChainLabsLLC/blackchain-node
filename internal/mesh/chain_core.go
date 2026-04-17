@@ -323,6 +323,9 @@ c.ensureGenesisLocked()
 	if b.BalancesRoot != expectedRoot {
 		return fmt.Errorf("bad balances_root (have %s want %s)", b.BalancesRoot, expectedRoot)
 	}
+	if err := c.persistBlockLocked(b); err != nil {
+		return fmt.Errorf("persist block height %d: %w", b.Height, err)
+	}
 
 	type snap struct {
 		bal   int64
@@ -393,8 +396,6 @@ c.ensureGenesisLocked()
 	}
 
 	c.blocks[b.Height] = b
-	_ = c.persistBlockLocked(b)
-
 	c.height = b.Height
 	c.tip = b.Hash
 
@@ -432,6 +433,12 @@ func (c *ProductionChain) applyBlockOrBufferLocked(b Block) (bool, error) {
 	}
 
 	if b.Height <= c.height {
+		if existing, ok := c.blocks[b.Height]; ok {
+			if existing.Hash == b.Hash {
+				return false, nil
+			}
+			return false, fmt.Errorf("conflicting stale block at height %d", b.Height)
+		}
 		return false, nil
 	}
 
@@ -458,9 +465,13 @@ func (c *ProductionChain) applyBlockOrBufferLocked(b Block) (bool, error) {
 		return true, nil
 	}
 
-	if _, ok := c.pending[b.Height]; !ok {
-		c.pending[b.Height] = b
+	if pending, ok := c.pending[b.Height]; ok {
+		if pending.Hash == b.Hash {
+			return false, nil
+		}
+		return false, fmt.Errorf("conflicting pending block at height %d", b.Height)
 	}
+	c.pending[b.Height] = b
 	return false, nil
 }
 

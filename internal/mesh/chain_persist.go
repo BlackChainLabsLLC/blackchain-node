@@ -1,6 +1,7 @@
 package mesh
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -80,7 +81,7 @@ func (c *ProductionChain) loadFromDisk() error {
 			return err
 		}
 		var b Block
-		if err := json.Unmarshal(raw, &b); err != nil {
+		if err := decodePersistedBlock(raw, f.h, &b); err != nil {
 			if f.h == maxH {
 				if recoveryErr := handleReplayCorruption("block replay", f.p, fmt.Errorf("decode height %d: %w", f.h, err), true); recoveryErr == nil {
 					continue
@@ -91,10 +92,24 @@ func (c *ProductionChain) loadFromDisk() error {
 			return handleReplayCorruption("block replay", f.p, fmt.Errorf("decode height %d: %w", f.h, err), false)
 		}
 		if err := c.applyBlockLocked(b); err != nil {
-			return fmt.Errorf("replay height %d: %w", b.Height, err)
+			allowBestEffort := f.h == maxH
+			return handleReplayCorruption("block replay", f.p, fmt.Errorf("apply height %d: %w", b.Height, err), allowBestEffort)
 		}
 	}
 
+	return nil
+}
+
+func decodePersistedBlock(raw []byte, expectedHeight int64, out *Block) error {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return fmt.Errorf("empty block file")
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
+		return err
+	}
+	if out.Height != expectedHeight {
+		return fmt.Errorf("filename/content height mismatch: file=%d block=%d", expectedHeight, out.Height)
+	}
 	return nil
 }
 

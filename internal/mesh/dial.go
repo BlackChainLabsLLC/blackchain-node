@@ -19,6 +19,9 @@ func (m *meshDaemon) ConnectToPeers(peerList []string) {
 				if addr == "" || addr == m.id {
 					continue
 				}
+				if !m.shouldDialPeer(addr, time.Now()) {
+					continue
+				}
 
 				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 				conn, err := meshDialTimeout(ctx, addr, 2*time.Second, m.tlsCfg)
