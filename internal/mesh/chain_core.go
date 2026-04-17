@@ -438,10 +438,6 @@ func (c *ProductionChain) applyBlockLocked(b Block) error {
 		return fmt.Errorf("missing time")
 	}
 
-	if b.ValidatorID == "" {
-		return fmt.Errorf("missing validator_id")
-	}
-
 	c.observeValidatorLocked(b.ValidatorID)
 	c.observeValidatorLocked(b.Producer)
 
@@ -450,12 +446,8 @@ func (c *ProductionChain) applyBlockLocked(b Block) error {
 		return fmt.Errorf("bad hash")
 	}
 
-	if !VerifyBlockSignature(b) {
-		return fmt.Errorf("invalid block signature")
-	}
-
-	if b.Producer == "" {
-		return fmt.Errorf("missing producer")
+	if err := ValidateBlockSignature(b); err != nil {
+		return fmt.Errorf("invalid block signature: %w", err)
 	}
 
 	expectedReward := func() int64 {
@@ -611,6 +603,9 @@ func (c *ProductionChain) applyBlockOrBufferLocked(b Block) (bool, error) {
 	if b.Hash == "" || b.Hash != c.calcBlockHash(b) {
 		return false, fmt.Errorf("proposal rejected: bad hash")
 	}
+	if err := ValidateBlockSignature(b); err != nil {
+		return false, fmt.Errorf("proposal rejected: invalid block signature: %w", err)
+	}
 
 	for _, tx := range b.Txs {
 		if tx.From == "" || tx.To == "" || tx.From == tx.To || tx.Amount <= 0 {
@@ -704,6 +699,20 @@ func (c *ProductionChain) proposalSafetyCheckLocked(localValidator string) error
 		return fmt.Errorf("proposal aborted: buffered proposal from another validator height=%d producer=%s hash=%s", blocked.Height, blocked.Producer, blocked.Hash)
 	}
 
+	return nil
+}
+
+func (c *ProductionChain) requireValidatorActionReadyLocked(nodeID string) error {
+	if nodeID != "node1" {
+		return fmt.Errorf("validator action rejected: not leader (node_id=%s)", nodeID)
+	}
+	pubHex, err := c.EnsureValidatorIdentityLocked()
+	if err != nil {
+		return fmt.Errorf("validator action rejected: validator identity: %w", err)
+	}
+	if pubHex == "" || pubHex == "ERR_NO_VALIDATOR" {
+		return fmt.Errorf("validator action rejected: validator identity unavailable")
+	}
 	return nil
 }
 
@@ -891,7 +900,10 @@ func (c *ProductionChain) proposeBlock() error {
 		}
 	}
 
-	pubHex := c.ValidatorIDLocked()
+	pubHex, err := c.EnsureValidatorIdentityLocked()
+	if err != nil {
+		return err
+	}
 	privHex, err := c.ValidatorPrivHexLocked()
 	if err != nil {
 		return err

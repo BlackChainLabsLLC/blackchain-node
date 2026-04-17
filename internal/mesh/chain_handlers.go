@@ -256,15 +256,11 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 		if !m.requireAdminSurface(w) {
 			return
 		}
-		// Leader gating: only the configured leader node may propose.
-		if m.nodeID != "node1" {
-			w.WriteHeader(http.StatusForbidden)
-			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "not leader", "node_id": m.nodeID})
-			return
-		}
-
 		m.chain.mu.Lock()
-		err := m.chain.proposeBlock()
+		err := m.chain.requireValidatorActionReadyLocked(m.nodeID)
+		if err == nil {
+			err = m.chain.proposeBlock()
+		}
 		m.chain.mu.Unlock()
 
 		if err != nil {
@@ -285,15 +281,11 @@ func (m *meshDaemon) registerChainHandlers(mux *http.ServeMux) {
 		if !m.requireAdminSurface(w) {
 			return
 		}
-		// Leader gating: only the configured leader node may propose+broadcast.
-		if m.nodeID != "node1" {
-			w.WriteHeader(http.StatusForbidden)
-			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "not leader", "node_id": m.nodeID})
-			return
-		}
-
 		m.chain.mu.Lock()
-		err := m.chain.proposeBlock()
+		err := m.chain.requireValidatorActionReadyLocked(m.nodeID)
+		if err == nil {
+			err = m.chain.proposeBlock()
+		}
 		if err != nil {
 			m.chain.mu.Unlock()
 			http.Error(w, err.Error(), 400)
