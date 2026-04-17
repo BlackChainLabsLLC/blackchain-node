@@ -2,7 +2,6 @@ package mesh
 
 import (
 	"encoding/json"
-	"io"
 	"net/http"
 )
 
@@ -10,7 +9,10 @@ import (
 func (m *meshDaemon) registerSnapshotHandlers(mux *http.ServeMux) {
 
 	// GET /chain/snapshot
-	mux.HandleFunc("/chain/snapshot", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/chain/snapshot", func(w http.ResponseWriter, r *http.Request) {
+		if !allowMethod(w, r, http.MethodGet) {
+			return
+		}
 		m.chain.mu.RLock()
 		snap := m.chain.ExportSnapshotLocked()
 		m.chain.mu.RUnlock()
@@ -21,18 +23,20 @@ func (m *meshDaemon) registerSnapshotHandlers(mux *http.ServeMux) {
 
 	// POST /chain/snapshot/apply
 	mux.HandleFunc("/chain/snapshot/apply", func(w http.ResponseWriter, r *http.Request) {
-		raw, err := io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		if !allowMethod(w, r, http.MethodPost) {
+			return
+		}
+		var raw json.RawMessage
+		if !decodeJSONBody(w, r, &raw, maxJSONBodyLarge) {
 			return
 		}
 
 		m.chain.mu.Lock()
-		ok, err := m.chain.LoadSnapshotFromBytes(raw)
+		ok, err := m.chain.LoadSnapshotFromBytes([]byte(raw))
 		m.chain.mu.Unlock()
 
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeAPIError(w, r, http.StatusBadRequest, "snapshot_apply_failed", err.Error())
 			return
 		}
 

@@ -258,22 +258,33 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 		m.registerChainHandlers(mux)
 
 		m.httpSrv = &http.Server{
-			Addr:    cfg.HttpListen,
-			Handler: buildHTTPMiddleware(cfg)(mux),
+			Addr:              cfg.HttpListen,
+			Handler:           buildHTTPMiddleware(cfg)(buildHTTPGuardrailMiddleware()(mux)),
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       15 * time.Second,
+			WriteTimeout:      30 * time.Second,
+			IdleTimeout:       60 * time.Second,
+			MaxHeaderBytes:    1 << 20,
 			TLSConfig: &tls.Config{
 				MinVersion: tls.VersionTLS12,
 			},
 		}
 
 		mux.HandleFunc("/peers", func(w http.ResponseWriter, r *http.Request) {
-
+			if r.Method != http.MethodGet && r.Method != http.MethodPost {
+				w.Header().Set("Allow", http.MethodGet+", "+http.MethodPost)
+				writeAPIError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "only GET and POST are supported for this endpoint")
+				return
+			}
 			if r.Method == http.MethodPost {
 
 				var req struct {
 					Addr string `json:"addr"`
 				}
 
-				_ = json.NewDecoder(r.Body).Decode(&req)
+				if !decodeJSONBody(w, r, &req, maxJSONBodySmall) {
+					return
+				}
 
 				addr := strings.TrimSpace(req.Addr)
 
@@ -335,7 +346,10 @@ func StartMeshDaemon(ctx context.Context, opts *MeshDaemonOptions) (DaemonNode, 
 			_ = json.NewEncoder(w).Encode(out)
 		})
 
-		mux.HandleFunc("/routes", func(w http.ResponseWriter, _ *http.Request) {
+		mux.HandleFunc("/routes", func(w http.ResponseWriter, r *http.Request) {
+			if !allowMethod(w, r, http.MethodGet) {
+				return
+			}
 
 			m.lock.RLock()
 			defer m.lock.RUnlock()
