@@ -8,6 +8,7 @@
   - `/operator/`
   - `/territory/`
   - `/territory/thanks/`
+  - `/territories/`
   - `/leads/`
   - `/founder/`
 - keep CTA targets and form field names aligned to the production docs before publishing
@@ -41,5 +42,10 @@
 - [FOUNDER_REVIEW_RHYTHM_GUIDE.md](/mnt/blacknet/projects/blackchain/website/docs/FOUNDER_REVIEW_RHYTHM_GUIDE.md)
 - [FOUNDER_DECISION_QUEUE_TEMPLATE.md](/mnt/blacknet/projects/blackchain/website/docs/FOUNDER_DECISION_QUEUE_TEMPLATE.md)
 - [FOUNDER_FIRST_LOOK_EVERY_DAY.md](/mnt/blacknet/projects/blackchain/website/docs/FOUNDER_FIRST_LOOK_EVERY_DAY.md)
+- [TERRITORY_OPPORTUNITY_BRIEF_REFERENCE.md](/mnt/blacknet/projects/blackchain/website/docs/TERRITORY_OPPORTUNITY_BRIEF_REFERENCE.md)
+- [SALES_DISCOVERY_TEMPLATE_REFERENCE.md](/mnt/blacknet/projects/blackchain/website/docs/SALES_DISCOVERY_TEMPLATE_REFERENCE.md)
+- [TERRITORY_LAUNCH_CHECKLIST_REFERENCE.md](/mnt/blacknet/projects/blackchain/website/docs/TERRITORY_LAUNCH_CHECKLIST_REFERENCE.md)
+- [TERRITORY_PIPELINE_TRACKER_REFERENCE.md](/mnt/blacknet/projects/blackchain/website/docs/TERRITORY_PIPELINE_TRACKER_REFERENCE.md)
+- [Territory Workflow Surface](/mnt/blacknet/projects/blackchain/website/territories/index.html)
 - [Lead Workflow Surface](/mnt/blacknet/projects/blackchain/website/leads/index.html)
 - [Founder Command Center](/mnt/blacknet/projects/blackchain/website/founder/index.html)
