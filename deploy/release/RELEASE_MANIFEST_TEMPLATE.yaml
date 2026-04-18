@@ -1,0 +1,53 @@
+release_id: "2026-04-16T00:00:00Z"
+candidate:
+  commit: "<git-commit>"
+  branch: "<git-branch>"
+  built_at_utc: "<timestamp>"
+artifacts:
+  binaries:
+    blacknetd:
+      path: "/usr/local/bin/blacknetd"
+      sha256: "<sha256>"
+    blackctl:
+      path: "/usr/local/bin/blackctl"
+      sha256: "<sha256>"
+    signtx:
+      path: "/usr/local/bin/signtx"
+      sha256: "<sha256>"
+  config_bundle_refs:
+    - "/etc/blackchain/bootstrap/config.json"
+    - "/etc/blackchain/node1/config.json"
+    - "/etc/blackchain/node2/config.json"
+    - "/etc/blackchain/node3/config.json"
+  ca_cert_refs:
+    - "/etc/blackchain/tls/ca.pem"
+    - "tls/ca.pem"
+  node_cert_refs:
+    - "/etc/blackchain/tls/node1/cert.pem"
+    - "/etc/blackchain/tls/node2/cert.pem"
+    - "/etc/blackchain/tls/node3/cert.pem"
+  service_unit_refs:
+    - "/etc/systemd/system/blacknetd@.service"
+    - "deploy/systemd/blacknetd@.service"
+  env_refs:
+    - "/etc/blackchain/node1/blacknetd.env"
+    - "/etc/blackchain/node2/blacknetd.env"
+    - "/etc/blackchain/node3/blacknetd.env"
+staging_run_artifact_refs:
+  - "docs/production/LAUNCH_CANDIDATE_RUNBOOK.md"
+  - "docs/production/LAUNCH_GATE.md"
+  - "docs/production/STAGING_EXECUTION_WORKSHEET.md"
+  - "docs/production/runs/<run-id>/candidate_manifest.txt"
+  - "docs/production/runs/<run-id>/https_endpoint_validation_<timestamp>.txt"
+  - "docs/production/runs/<run-id>/final_surface_and_trust_checks_<timestamp>.txt"
+promotion:
+  promoted_by: "<operator>"
+  approved_by:
+    - "<reviewer>"
+  target_units:
+    - "blacknetd@bootstrap"
+    - "blacknetd@node1"
+    - "blacknetd@node2"
+    - "blacknetd@node3"
+  notes: ""
+

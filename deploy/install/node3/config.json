@@ -1,0 +1,20 @@
+{
+  "node_id": "node3",
+  "listen": "127.0.0.1:7074",
+  "http_listen": "127.0.0.1:6062",
+  "peers": [
+    "127.0.0.1:7072",
+    "127.0.0.1:7073"
+  ],
+  "data_dir": "/var/lib/blackchain/node3",
+  "tls": {
+    "enabled": true,
+    "cert_file": "/etc/blackchain/tls/node3/cert.pem",
+    "key_file": "/etc/blackchain/tls/node3/key.pem",
+    "ca_file": "/etc/blackchain/tls/ca.pem"
+  },
+  "http_rate_limit_enabled": true,
+  "http_rate_limit_rps": 100000,
+  "http_rate_limit_burst": 200000
+}
+

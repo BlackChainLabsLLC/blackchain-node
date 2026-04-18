@@ -1,0 +1,31 @@
+[Unit]
+Description=BlackChain Node %i
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/blackchain/%i/blacknetd.env
+User=blackchain
+Group=blackchain
+WorkingDirectory=/opt/blackchain/current
+ExecStart=/usr/local/bin/blacknetd mesh --config /etc/blackchain/%i/config.json --data /var/lib/blackchain/%i
+ExecStop=/bin/kill -s TERM $MAINPID
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=30s
+TimeoutStopSec=45s
+KillSignal=SIGTERM
+KillMode=mixed
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/blackchain/%i
+ReadOnlyPaths=/etc/blackchain/%i
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

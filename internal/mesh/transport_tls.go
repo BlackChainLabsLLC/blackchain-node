@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -18,8 +20,8 @@ func tlsConfigFrom(t *MeshTLS, isServer bool) (*tls.Config, error) {
 	if t == nil || !t.Enabled {
 		return nil, nil
 	}
-	if t.CertFile == "" || t.KeyFile == "" || t.CAFile == "" {
-		return nil, fmt.Errorf("tls enabled but cert/key/ca not fully configured")
+	if err := t.validate(); err != nil {
+		return nil, err
 	}
 
 	cert, err := tls.LoadX509KeyPair(t.CertFile, t.KeyFile)
@@ -71,4 +73,72 @@ func meshDialTimeout(ctx context.Context, addr string, timeout time.Duration, t 
 		return nil, err
 	}
 	return tls.DialWithDialer(d, "tcp", addr, tc)
+}
+
+func (t *MeshTLS) validate() error {
+	if t == nil || !t.Enabled {
+		return nil
+	}
+	if t.CertFile == "" || t.KeyFile == "" || t.CAFile == "" {
+		return fmt.Errorf("config validation: tls enabled but cert_file/key_file/ca_file are not fully configured")
+	}
+	if err := validateTLSFile("tls cert_file", t.CertFile, false); err != nil {
+		return err
+	}
+	if err := validateTLSFile("tls key_file", t.KeyFile, true); err != nil {
+		return err
+	}
+	if err := validateTLSFile("tls ca_file", t.CAFile, false); err != nil {
+		return err
+	}
+
+	cert, err := tls.LoadX509KeyPair(t.CertFile, t.KeyFile)
+	if err != nil {
+		return fmt.Errorf("config validation: tls cert_file/key_file mismatch: %w", err)
+	}
+	if len(cert.Certificate) == 0 {
+		return fmt.Errorf("config validation: tls cert_file does not contain a certificate")
+	}
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		return fmt.Errorf("config validation: parse tls cert_file: %w", err)
+	}
+	now := time.Now()
+	if now.Before(leaf.NotBefore) {
+		return fmt.Errorf("config validation: tls cert_file is not valid before %s", leaf.NotBefore.UTC().Format(time.RFC3339))
+	}
+	if now.After(leaf.NotAfter) {
+		return fmt.Errorf("config validation: tls cert_file expired at %s", leaf.NotAfter.UTC().Format(time.RFC3339))
+	}
+
+	caPEM, err := os.ReadFile(t.CAFile)
+	if err != nil {
+		return fmt.Errorf("config validation: read tls ca_file: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		return fmt.Errorf("config validation: tls ca_file does not contain valid PEM certificates")
+	}
+	return nil
+}
+
+func validateTLSFile(label, path string, privateKey bool) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return fmt.Errorf("config validation: %s must not be empty", label)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("config validation: %s not accessible at %s: %w", label, path, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("config validation: %s path must be a file, not a directory: %s", label, path)
+	}
+	if _, err := os.ReadFile(path); err != nil {
+		return fmt.Errorf("config validation: %s is not readable at %s: %w", label, path, err)
+	}
+	if privateKey && info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("config validation: %s permissions are too broad on %s; require owner-only access", label, filepath.Clean(path))
+	}
+	return nil
 }

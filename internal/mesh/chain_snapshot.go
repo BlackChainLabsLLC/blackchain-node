@@ -1,7 +1,7 @@
 package mesh
 
 import (
-	"regexp"
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 )
+
 type ChainSnapshot struct {
 	Height       int64              `json:"height"`
 	Hash         string             `json:"hash"`
@@ -60,16 +61,15 @@ func (c *ProductionChain) SaveSnapshotLocked() error {
 		return err
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return writeFileAtomicDurable(path, tmp, raw, 0o644)
 }
 
 // LoadSnapshotFromDisk attempts to load snapshot.json and apply it as chain base.
 // This resets in-memory state to snapshot, then replays any persisted blocks ABOVE snapshot height.
 func (c *ProductionChain) LoadSnapshotFromDisk() (bool, error) {
-	exactBlockJSONNameRE := regexp.MustCompile(`^[0-9]+\.json$`)
+	if err := c.recoverInterruptedSnapshotWrite(); err != nil {
+		return false, err
+	}
 	path := c.snapshotPath()
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -81,32 +81,20 @@ func (c *ProductionChain) LoadSnapshotFromDisk() (bool, error) {
 
 	var snap ChainSnapshot
 	if err := json.Unmarshal(raw, &snap); err != nil {
-		return false, err
+		return false, handleReplayCorruption("snapshot replay", path, fmt.Errorf("decode snapshot: %w", err), false)
+	}
+	accounts, err := validateSnapshotPayload(raw, snap)
+	if err != nil {
+		return false, handleReplayCorruption("snapshot replay", path, err, false)
 	}
 
-	// Reset chain state to snapshot
+	// Reset chain state to validated snapshot
 	c.height = snap.Height
 	c.tip = snap.Hash
-	c.accounts = make(map[string]*Account, len(snap.Accounts))
-	for k, v := range snap.Accounts {
-		vv := v
-		c.accounts[k] = &vv
-	}
-	if snap.AccountsHash == "" {
-		return false, fmt.Errorf("snapshot missing accounts_hash")
-	}
-	if computeAccountsHash(c.accounts) != snap.AccountsHash {
-		return false, fmt.Errorf("snapshot accounts_hash mismatch")
-	}
-	if snap.SnapshotHash == "" {
-		return false, fmt.Errorf("snapshot missing snapshot_hash")
-	}
-	if computeSnapshotHash(snap.Height, snap.Hash, snap.AccountsHash) != snap.SnapshotHash {
-		return false, fmt.Errorf("snapshot hash mismatch")
-	}
+	c.accounts = accounts
 	c.blocks = make(map[int64]Block)
 	c.pending = make(map[int64]Block)
-	c.mempool = make([]Tx, 0, 256)
+	c.resetMempoolLocked(MaxMempoolTxs)
 
 	// Replay persisted blocks above snapshot height, if any exist.
 	dir := c.blockDir()
@@ -146,57 +134,120 @@ func (c *ProductionChain) LoadSnapshotFromDisk() (bool, error) {
 			return false, err
 		}
 		var b Block
-		if err := json.Unmarshal(raw, &b); err != nil {
+		if err := decodePersistedBlock(raw, f.h, &b); err != nil {
 			if f.h == maxH {
-				log.Printf("[snapshot] skipping malformed tail block height=%d path=%s err=%v", f.h, f.p, err)
-				continue
+				if recoveryErr := handleReplayCorruption("post-snapshot block replay", f.p, fmt.Errorf("decode height %d: %w", f.h, err), true); recoveryErr == nil {
+					continue
+				} else {
+					return false, recoveryErr
+				}
 			}
-			return false, fmt.Errorf("replay post-snapshot decode height %d path %s: %w", f.h, f.p, err)
+			return false, handleReplayCorruption("post-snapshot block replay", f.p, fmt.Errorf("decode height %d: %w", f.h, err), false)
 		}
 		// Use full validation
 		if err := c.applyBlockLocked(b); err != nil {
-			return false, fmt.Errorf("replay post-snapshot height %d: %w", b.Height, err)
+			allowBestEffort := f.h == maxH
+			return false, handleReplayCorruption("post-snapshot block replay", f.p, fmt.Errorf("apply height %d: %w", b.Height, err), allowBestEffort)
 		}
 	}
 
 	return true, nil
 }
 
+func (c *ProductionChain) recoverInterruptedSnapshotWrite() error {
+	path := c.snapshotPath()
+	tmpPath := path + ".tmp"
+	if _, err := os.Stat(tmpPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if _, err := os.Stat(path); err == nil {
+		_ = os.Remove(tmpPath)
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	raw, err := os.ReadFile(tmpPath)
+	if err != nil {
+		return err
+	}
+	var snap ChainSnapshot
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		return handleReplayCorruption("interrupted snapshot write recovery", tmpPath, fmt.Errorf("decode tmp snapshot: %w", err), false)
+	}
+	if _, err := validateSnapshotPayload(raw, snap); err != nil {
+		return handleReplayCorruption("interrupted snapshot write recovery", tmpPath, err, false)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("recover tmp snapshot %s: %w", tmpPath, err)
+	}
+	if err := syncDir(filepath.Dir(path)); err != nil {
+		return err
+	}
+	if c.daemon != nil {
+		c.daemon.recordRecoveryEvent("snapshot_tmp_promoted", fmt.Sprintf("tmp=%s final=%s height=%d", tmpPath, path, snap.Height))
+	}
+	log.Printf("[recovery] promoted interrupted snapshot write tmp=%s final=%s height=%d", tmpPath, path, snap.Height)
+	return nil
+}
+
 // LoadSnapshotFromBytes applies a snapshot payload received over the mesh.
 // It resets in-memory state to the snapshot base.
 func (c *ProductionChain) LoadSnapshotFromBytes(raw []byte) (bool, error) {
 	var snap ChainSnapshot
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return false, fmt.Errorf("empty snapshot payload")
+	}
 	if err := json.Unmarshal(raw, &snap); err != nil {
 		return false, err
 	}
+	accounts, err := validateSnapshotPayload(raw, snap)
+	if err != nil {
+		return false, err
+	}
 
-	// Reset chain state to snapshot
+	// Reset chain state to validated snapshot
 	c.height = snap.Height
 	c.tip = snap.Hash
-
-	c.accounts = make(map[string]*Account, len(snap.Accounts))
-	for k, v := range snap.Accounts {
-		vv := v
-		c.accounts[k] = &vv
-	}
-	if snap.AccountsHash == "" {
-		return false, fmt.Errorf("snapshot missing accounts_hash")
-	}
-	if computeAccountsHash(c.accounts) != snap.AccountsHash {
-		return false, fmt.Errorf("snapshot accounts_hash mismatch")
-	}
-	if snap.SnapshotHash == "" {
-		return false, fmt.Errorf("snapshot missing snapshot_hash")
-	}
-	if computeSnapshotHash(snap.Height, snap.Hash, snap.AccountsHash) != snap.SnapshotHash {
-		return false, fmt.Errorf("snapshot hash mismatch")
-	}
+	c.accounts = accounts
 
 	c.blocks = make(map[int64]Block)
 	c.pending = make(map[int64]Block)
-	c.mempool = make([]Tx, 0, 256)
+	c.resetMempoolLocked(MaxMempoolTxs)
 
 	return true, nil
+}
+
+func validateSnapshotPayload(raw []byte, snap ChainSnapshot) (map[string]*Account, error) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil, fmt.Errorf("empty snapshot payload")
+	}
+	accounts := make(map[string]*Account, len(snap.Accounts))
+	for k, v := range snap.Accounts {
+		if v.Balance < 0 {
+			return nil, fmt.Errorf("snapshot account %q has negative balance", k)
+		}
+		if v.Nonce < 0 {
+			return nil, fmt.Errorf("snapshot account %q has negative nonce", k)
+		}
+		vv := v
+		accounts[k] = &vv
+	}
+	if snap.AccountsHash == "" {
+		return nil, fmt.Errorf("snapshot missing accounts_hash")
+	}
+	if computeAccountsHash(accounts) != snap.AccountsHash {
+		return nil, fmt.Errorf("snapshot accounts_hash mismatch")
+	}
+	if snap.SnapshotHash == "" {
+		return nil, fmt.Errorf("snapshot missing snapshot_hash")
+	}
+	if computeSnapshotHash(snap.Height, snap.Hash, snap.AccountsHash) != snap.SnapshotHash {
+		return nil, fmt.Errorf("snapshot hash mismatch")
+	}
+	return accounts, nil
 }
 func computeAccountsHash(accts map[string]*Account) string {
 	type pair struct {

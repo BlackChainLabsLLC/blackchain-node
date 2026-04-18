@@ -13,10 +13,18 @@ import (
 func (m *meshDaemon) ConnectToPeers(peerList []string) {
 	go func() {
 		for {
+			select {
+			case <-m.runCtx.Done():
+				return
+			default:
+			}
 			for _, addr := range peerList {
 
 				addr = strings.TrimSpace(addr)
 				if addr == "" || addr == m.id {
+					continue
+				}
+				if !m.shouldDialPeer(addr, time.Now()) {
 					continue
 				}
 
@@ -52,7 +60,11 @@ func (m *meshDaemon) ConnectToPeers(peerList []string) {
 				log.Println("[peers] reachable+hello →", addr)
 			}
 
-			time.Sleep(3 * time.Second)
+			select {
+			case <-m.runCtx.Done():
+				return
+			case <-time.After(3 * time.Second):
+			}
 		}
 	}()
 }
